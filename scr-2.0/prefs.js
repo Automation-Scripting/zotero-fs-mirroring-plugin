@@ -1,0 +1,1 @@
+pref("extensions.fs-mirror.rootDir", "");

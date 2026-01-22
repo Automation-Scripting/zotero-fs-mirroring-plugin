@@ -1,0 +1,15 @@
+{
+    "manifest_version": 2,
+    "name": "File-system Mirroring",
+    "version": "2.0",
+    "description": "Mirror the hierarchy to file system",
+    "homepage_url": "https://github.com/automations-scripting/zotero-fs-mirroring-plugin",
+    "applications": {
+        "zotero": {
+            "id": "fs-mirroring@chanah.dev",
+            "update_url": "https://github.com/automations-scripting/zotero-fs-mirroring-plugin",
+            "strict_min_version": "7.0",
+            "strict_max_version": "7.1.*"
+        }
+    }
+}
