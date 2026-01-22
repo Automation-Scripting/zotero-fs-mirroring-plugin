@@ -1,0 +1,12 @@
+{
+  "manifest_version": 2,
+  "name": "FS Collections Sync (Chanah)",
+  "version": "0.1.0",
+  "description": "Mirror Zotero collections to filesystem folders (create/rename/move).",
+  "applications": {
+    "zotero": {
+      "id": "fs-collections-sync@chanah.dev",
+      "strict_min_version": "7.0"
+    }
+  }
+}
