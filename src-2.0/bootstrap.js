@@ -2,45 +2,40 @@
 
 var FSMirror;
 
-function log(msg) {
-	Zotero.debug("FS Mirror: " + msg);
+function _log(msg) {
+  Zotero.debug(`FSMirror/bootstrap: ${msg}`);
 }
 
 function install() {
-	log("Installed");
+  _log("install()");
 }
 
 async function startup({ id, version, rootURI }) {
-	log(`Starting (v=${version})`);
+  _log(`startup() id=${id} version=${version}`);
 
-	// (opcional) painel de preferências do plugin
-	Zotero.PreferencePanes.register({
-		pluginID: "fs-mirroring@chanah.dev",
-		src: rootURI + "preferences.xhtml",
-		scripts: [rootURI + "preferences.js"],
-	});
+  // carrega módulos
+  Services.scriptloader.loadSubScript(rootURI + "fs.js");
+  Services.scriptloader.loadSubScript(rootURI + "mirror_collections.js");
+  Services.scriptloader.loadSubScript(rootURI + "fsmirror.js");
 
-	// Carrega o engine
-	Services.scriptloader.loadSubScript(rootURI + "fs-mirror.js");
+  FSMirror.init({ id, version, rootURI });
+  await FSMirror.start();
+}
 
-	// Inicializa e roda
-	FSMirror.init({ id, version, rootURI });
-	await FSMirror.main();
+function onMainWindowLoad({ window }) {
+  FSMirror?.onMainWindowLoad?.(window);
+}
+
+function onMainWindowUnload({ window }) {
+  FSMirror?.onMainWindowUnload?.(window);
 }
 
 function shutdown() {
-	log("Shutting down");
-
-	try {
-		// Se você implementar FSMirror.shutdown(), ele limpa observers/timers
-		FSMirror?.shutdown?.();
-	} catch (e) {
-		log("Error during shutdown: " + e);
-	}
-
-	FSMirror = undefined;
+  _log("shutdown()");
+  FSMirror?.stop?.();
+  FSMirror = undefined;
 }
 
 function uninstall() {
-	log("Uninstalled");
+  _log("uninstall()");
 }
