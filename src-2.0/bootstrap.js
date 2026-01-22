@@ -1,81 +1,46 @@
-/* global Zotero */
+/* global Zotero, Services */
 
-var FSMirror = {
-	id: null,
-	version: null,
-	rootURI: null,
-	initialized: false,
+var FSMirror;
 
-	_notifierID: null,
+function log(msg) {
+	Zotero.debug("FS Mirror: " + msg);
+}
 
-	init({ id, version, rootURI }) {
-		if (this.initialized) return;
-		this.id = id;
-		this.version = version;
-		this.rootURI = rootURI;
-		this.initialized = true;
-	},
+function install() {
+	log("Installed");
+}
 
-	log(msg) {
-		Zotero.debug("FS Mirror: " + msg);
-	},
+async function startup({ id, version, rootURI }) {
+	log(`Starting (v=${version})`);
 
-	pref(key, global = true) {
-		return Zotero.Prefs.get(`extensions.fs-mirroring.${key}`, global);
-	},
+	// (opcional) painel de preferências do plugin
+	Zotero.PreferencePanes.register({
+		pluginID: "fs-mirroring@chanah.dev",
+		src: rootURI + "preferences.xhtml",
+		scripts: [rootURI + "preferences.js"],
+	});
 
-	async main() {
-		this.log(`Loaded (id=${this.id}, version=${this.version})`);
-		const rootDir = this.pref("rootDir");
-		this.log(`rootDir=${rootDir ?? "(not set)"}`);
+	// Carrega o engine
+	Services.scriptloader.loadSubScript(rootURI + "fs-mirror.js");
 
-		// --- Notifier observer: começa simples ---
-		if (this._notifierID) return;
+	// Inicializa e roda
+	FSMirror.init({ id, version, rootURI });
+	await FSMirror.main();
+}
 
-		const observer = {
-			notify: async (event, type, ids, extraData) => {
-				try {
-					// event: 'add' | 'modify' | 'delete' | 'move'...
-					// type: 'item' (inclui attachments), 'collection', etc.
-					FSMirror.log(`NOTIFY event=${event} type=${type} ids=[${ids.join(",")}]`);
+function shutdown() {
+	log("Shutting down");
 
-					if (type !== "item") return;
+	try {
+		// Se você implementar FSMirror.shutdown(), ele limpa observers/timers
+		FSMirror?.shutdown?.();
+	} catch (e) {
+		log("Error during shutdown: " + e);
+	}
 
-					// Carrega os itens e filtra attachments
-					const items = await Zotero.Items.getAsync(ids);
-					for (const item of items) {
-						if (!item) continue;
+	FSMirror = undefined;
+}
 
-						if (item.isAttachment && item.isAttachment()) {
-							const filename = item.getFilename?.() ?? "(no filename)";
-							const title = item.getField?.("title") ?? "(no title)";
-							FSMirror.log(`  ATTACHMENT id=${item.id} file=${filename} title=${title}`);
-						} else {
-							const title = item.getField?.("title") ?? "(no title)";
-							FSMirror.log(`  ITEM id=${item.id} title=${title}`);
-						}
-					}
-				} catch (e) {
-					FSMirror.log("Notifier error: " + e);
-				}
-			},
-		};
-
-		// Observa só o tipo "item" (suficiente pra anexos)
-		this._notifierID = Zotero.Notifier.registerObserver(observer, ["item"], "fs-mirroring");
-		this.log("Notifier registered: " + this._notifierID);
-	},
-
-	shutdown() {
-		try {
-			if (this._notifierID) {
-				Zotero.Notifier.unregisterObserver(this._notifierID);
-				this.log("Notifier unregistered: " + this._notifierID);
-				this._notifierID = null;
-			}
-		} catch (e) {
-			this.log("Shutdown error: " + e);
-		}
-		this.log("Shutdown");
-	},
-};
+function uninstall() {
+	log("Uninstalled");
+}
