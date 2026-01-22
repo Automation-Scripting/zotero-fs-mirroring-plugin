@@ -1,0 +1,1 @@
+# zotero-fs-mirroring-plugin
