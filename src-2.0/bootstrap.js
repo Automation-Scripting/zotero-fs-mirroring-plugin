@@ -1,42 +1,46 @@
-var MakeItRed;
+/* global Zotero, Services */
+
+var FSMirror;
 
 function log(msg) {
-	Zotero.debug("Make It Red: " + msg);
+	Zotero.debug("FS Mirror: " + msg);
 }
 
 function install() {
-	log("Installed 2.0");
+	log("Installed");
 }
 
 async function startup({ id, version, rootURI }) {
-	log("Starting 2.0");
-	
+	log(`Starting (v=${version})`);
+
+	// (opcional) painel de preferências do plugin
 	Zotero.PreferencePanes.register({
-		pluginID: 'make-it-red@example.com',
-		src: rootURI + 'preferences.xhtml',
-		scripts: [rootURI + 'preferences.js']
+		pluginID: "fs-mirroring@chanah.dev",
+		src: rootURI + "preferences.xhtml",
+		scripts: [rootURI + "preferences.js"],
 	});
-	
-	Services.scriptloader.loadSubScript(rootURI + 'make-it-red.js');
-	MakeItRed.init({ id, version, rootURI });
-	MakeItRed.addToAllWindows();
-	await MakeItRed.main();
-}
 
-function onMainWindowLoad({ window }) {
-	MakeItRed.addToWindow(window);
-}
+	// Carrega o engine
+	Services.scriptloader.loadSubScript(rootURI + "fs-mirror.js");
 
-function onMainWindowUnload({ window }) {
-	MakeItRed.removeFromWindow(window);
+	// Inicializa e roda
+	FSMirror.init({ id, version, rootURI });
+	await FSMirror.main();
 }
 
 function shutdown() {
-	log("Shutting down 2.0");
-	MakeItRed.removeFromAllWindows();
-	MakeItRed = undefined;
+	log("Shutting down");
+
+	try {
+		// Se você implementar FSMirror.shutdown(), ele limpa observers/timers
+		FSMirror?.shutdown?.();
+	} catch (e) {
+		log("Error during shutdown: " + e);
+	}
+
+	FSMirror = undefined;
 }
 
 function uninstall() {
-	log("Uninstalled 2.0");
+	log("Uninstalled");
 }
