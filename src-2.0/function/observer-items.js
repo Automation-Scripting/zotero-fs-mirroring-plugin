@@ -189,8 +189,15 @@ var FS_ItemsObserver = {
         api.info("ITEM", `ACTION: move linked -> trash "${path}" -> "${dst}"`);
         await _moveFile(path, dst);
 
-        await _setLinkedAttachmentPath(att, dst);
-        api.info("ITEM", `ACTION: updated attachment path -> "${dst}"`);
+        api.info("ITEM", `TRASH: before saveTx inTrash=${item.isInTrash?.()} path="${path}" -> "${dst}"`);
+
+        item.setField("path", dst);
+        await item.saveTx();
+
+        api.info("ITEM", `TRASH: after saveTx inTrash=${item.isInTrash?.()} path="${dst}"`);
+
+        // await _setLinkedAttachmentPath(att, dst);
+        // api.info("ITEM", `ACTION: updated attachment path -> "${dst}"`);
     },
 
     // ------------------------------------------------------------------
