@@ -202,6 +202,10 @@ FS_Mirror = {
 	},
 
 	async main() {
+
+		this._registerObservers();
+		this.info("MAIN", "observers registered (dry mode)");
+
 		// Global properties are included automatically in Zotero 7
 		var host = new URL('https://foo.com/path').host;
 		this.log(`Host is ${host}`);
@@ -213,5 +217,48 @@ FS_Mirror = {
 		this.log(`[Preferences] Debug mode: ${Zotero.Prefs.get('extensions.fs-mirror.debug', true)}`);
 		this.log(`[Preferences] Internal logs: ${Zotero.Prefs.get('extensions.fs-mirror.echoToZotero', true)}`);
 		this.info("MAIN", "logger ready (if logfile path exists, it will be written)");
+	},
+
+	_notifierID: null,
+
+	_registerObservers() {
+		if (this._notifierID) return;
+
+		const observer = {
+			notify: async (event, type, ids, extraData) => {
+				// Só coleções por enquanto
+				if (type !== "collection") return;
+
+				try {
+					this.info("NOTIFY", `event=${event} type=${type} ids=[${(ids || []).join(",")}]`);
+
+					if (event === "add") {
+						for (const id of (ids || [])) {
+							await FS_CollectionsObserver.onAdd(this, id);
+						}
+					} else {
+						// por enquanto só loga os outros
+						this.debug("NOTIFY", `ignored event=${event} type=${type}`);
+					}
+				} catch (e) {
+					this.error("NOTIFY", String(e));
+				}
+			}
+		};
+
+		this._notifierID = Zotero.Notifier.registerObserver(
+			observer,
+			["collection"],
+			"fs-mirror"
+		);
+
+		this.info("NOTIFY", `registered notifierID=${this._notifierID}`);
+	},
+
+	_unregisterObservers() {
+		if (!this._notifierID) return;
+		Zotero.Notifier.unregisterObserver(this._notifierID);
+		this.info("NOTIFY", `unregistered notifierID=${this._notifierID}`);
+		this._notifierID = null;
 	}
 }
