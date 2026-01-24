@@ -41,7 +41,7 @@ var FSMirror = {
 	},
 
 	pref(key, global = true) {
-		return Zotero.Prefs.get(`extensions.fs-mirroring.${key}`, global);
+		return Zotero.Prefs.get(`extensions.fs-mirror.${key}`, global);
 	},
 
 	// -----------------------------
