@@ -229,33 +229,64 @@ FS_Mirror = {
 	},
 
 	_notifierID: null,
-
 	_registerObservers() {
 		if (this._notifierID) return;
 
 		const observer = {
 			notify: async (event, type, ids, extraData) => {
-				// Só coleções por enquanto
-				if (type !== "collection") return;
-
 				try {
 					this.info("NOTIFY", `event=${event} type=${type} ids=[${(ids || []).join(",")}]`);
 
-					if (event === "add") {
-						for (const id of (ids || [])) {
-							await FS_CollectionsObserver.onAdd(this, id);
+					// -------------------------
+					// COLLECTION events
+					// -------------------------
+					if (type === "collection") {
+						if (event === "add") {
+							for (const id of (ids || [])) await FS_CollectionsObserver.onAdd(this, id);
+						} else if (event === "modify") {
+							for (const id of (ids || [])) await FS_CollectionsObserver.onModify(this, id);
+						} else if (event === "delete" || event === "trash") {
+							for (const id of (ids || [])) await FS_CollectionsObserver.onDelete(this, id);
+						} else {
+							this.debug("NOTIFY", `ignored event=${event} type=${type}`);
 						}
-					} else if (event === "modify") {
-						for (const id of (ids || [])) {
-							await FS_CollectionsObserver.onModify(this, id);
-						}
-					} else if (event === "delete" || event === "trash") {
-						for (const id of (ids || [])) {
-							await FS_CollectionsObserver.onDelete(this, id);
-						}
-					} else {
-						this.debug("NOTIFY", `ignored event=${event} type=${type}`);
+						return;
 					}
+
+					// -------------------------
+					// ITEM events  (NEW)
+					// -------------------------
+					if (type === "item") {
+						// 1) sempre roda o classificador (Delete Collection vs Delete Collection and Items)
+						if (event === "trash" || event === "delete") {
+							if (typeof FS_ItemsObserver !== "undefined") {
+								await FS_ItemsObserver.onTrashOrDelete(this, event, ids);
+							} else {
+								this.warn("NOTIFY", "FS_ItemsObserver is undefined (did you load observer-items.js?)");
+							}
+						}
+
+						// 2) ação: quando deletar attachment LINKED, deletar arquivo no FS
+						if (event === "delete") {
+							if (typeof FS_ItemsObserver !== "undefined") {
+								for (const id of (ids || [])) {
+									await FS_ItemsObserver.onItemDelete(this, id);
+								}
+							}
+						} else if (event === "trash") {
+							// por enquanto só loga (evita apagar no trash, permite “undo” do Zotero)
+							if (typeof FS_ItemsObserver !== "undefined") {
+								for (const id of (ids || [])) {
+									await FS_ItemsObserver.onItemTrash(this, id);
+								}
+							}
+						}
+
+						return;
+					}
+
+					// outros tipos (search, tag, etc.)
+					this.debug("NOTIFY", `ignored type=${type} event=${event}`);
 				} catch (e) {
 					this.error("NOTIFY", String(e));
 				}
@@ -264,7 +295,7 @@ FS_Mirror = {
 
 		this._notifierID = Zotero.Notifier.registerObserver(
 			observer,
-			["collection"],
+			["collection", "item"],   // <<< IMPORTANT: agora observa item também
 			"fs-mirror"
 		);
 
