@@ -1,5 +1,29 @@
 /** fs-mirror.js */
 
+var IOUtils = globalThis.IOUtils;
+var PathUtils = globalThis.PathUtils;
+
+function _ts() {
+	const d = new Date();
+	const pad = (n, w = 2) => String(n).padStart(w, "0");
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+		`${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.` +
+		`${pad(d.getMilliseconds(), 3)}`;
+}
+
+function _dateStamp() {
+	const d = new Date();
+	const pad = (n, w = 2) => String(n).padStart(w, "0");
+	return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+}
+
+// join simples (não depende de OS.Path)
+function _joinPath(...parts) {
+	return parts.join("/").replace(/\/+/g, "/");
+}
+
+// ---------- External logging helpers (top of file) ----------
+
 FS_Mirror = {
 	id: null,
 	version: null,
@@ -15,9 +39,102 @@ FS_Mirror = {
 		this.initialized = true;
 	},
 
-	log(msg) {
-		Zotero.debug("[FS Mirror]: " + msg);
+	// -----------------------------
+	// External logger (IOUtils) + Zotero.debug
+	// -----------------------------
+	_logFilePath: null,
+	_logWriteChain: Promise.resolve(),
+	_runID: null,
+	_debug: true,
+	_echoToZotero: true,
+
+	async initLogger() {
+		this._debug = !!Zotero.Prefs.get("extensions.fs-mirror.debug", true);
+		this._echoToZotero = !!Zotero.Prefs.get("extensions.fs-mirror.echoToZotero", true);
+
+		let logsDir = Zotero.Prefs.get("extensions.fs-mirror.logsDir", true);
+
+		// fallback: usa rootDir/logs se logsDir não setado (bem intuitivo pro seu plugin)
+		if (!logsDir) {
+			const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true);
+			logsDir = rootDir ? _joinPath(rootDir, "logs") : null;
+		}
+		// último fallback: home/FSMirror/logs
+		if (!logsDir) {
+			logsDir = _joinPath(PathUtils?.homeDir || "", "FSMirror", "logs");
+		}
+
+		// cria diretório (recursive)
+		try {
+			await IOUtils.makeDirectory(logsDir, { createAncestors: true });
+		} catch (e) {
+			Zotero.debug(`[FS Mirror] ${_ts()} WARN cannot create logsDir="${logsDir}": ${String(e)}`);
+			this._logFilePath = null;
+			return;
+		}
+
+		this._runID = Math.random().toString(36).slice(2, 8);
+		const fileName = `fs-mirror-${_dateStamp()}-${this._runID}.log`;
+		this._logFilePath = _joinPath(logsDir, fileName);
+
+		// garante que o arquivo existe (touch controlado)
+		try {
+			if (!(await IOUtils.exists(this._logFilePath))) {
+				await IOUtils.write(this._logFilePath, new Uint8Array());
+			}
+		} catch (e) {
+			Zotero.debug(`[FS Mirror] ${_ts()} WARN cannot create logfile="${this._logFilePath}": ${String(e)}`);
+			this._logFilePath = null;
+			return;
+		}
+
+		this.info("LOG", `external logfile="${this._logFilePath}"`);
+		this.info("LOG", `debug=${this._debug} echoToZotero=${this._echoToZotero}`);
 	},
+
+	_appendLogLine(line) {
+		if (!this._logFilePath) return;
+
+		this._logWriteChain = this._logWriteChain.then(async () => {
+			try {
+				const enc = new TextEncoder();
+				const bytes = enc.encode(line);
+
+				// Se o arquivo ainda não existe, cria com write (sem append)
+				if (!(await IOUtils.exists(this._logFilePath))) {
+					await IOUtils.write(this._logFilePath, bytes);
+					return;
+				}
+
+				// Se existe, faz append com leitura+concat+write (universal)
+				const prev = await IOUtils.read(this._logFilePath);
+				const next = new Uint8Array(prev.length + bytes.length);
+				next.set(prev, 0);
+				next.set(bytes, prev.length);
+				await IOUtils.write(this._logFilePath, next);
+			} catch (e) {
+				Zotero.debug(`[FS Mirror] ${_ts()} ERROR write logfile: ${String(e)}`);
+			}
+		});
+	},
+
+	_emit(level, tag, msg) {
+		if (level === "DEBUG" && !this._debug) return;
+
+		const line = `${_ts()} ${level} ${tag} ${msg}`;
+		if (this._echoToZotero) {
+			Zotero.debug(`[FS Mirror] ${line}`);
+		}
+		this._appendLogLine(line + "\n");
+	},
+
+	debug(tag, msg) { this._emit("DEBUG", tag, msg); },
+	info(tag, msg) { this._emit("INFO", tag, msg); },
+	warn(tag, msg) { this._emit("WARN", tag, msg); },
+	error(tag, msg) { this._emit("ERROR", tag, msg); },
+
+	// compat
+	log(msg) { this.info("APP", msg); },
 
 	addToWindow(window) {
 		let doc = window.document;
@@ -95,5 +212,6 @@ FS_Mirror = {
 		this.log(`[Preferences] Trash folder: ${Zotero.Prefs.get('extensions.fs-mirror.safeTrashDirName', true)}`);
 		this.log(`[Preferences] Debug mode: ${Zotero.Prefs.get('extensions.fs-mirror.debug', true)}`);
 		this.log(`[Preferences] Internal logs: ${Zotero.Prefs.get('extensions.fs-mirror.echoToZotero', true)}`);
+		this.info("MAIN", "logger ready (if logfile path exists, it will be written)");
 	}
 }

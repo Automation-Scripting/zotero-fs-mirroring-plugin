@@ -20,6 +20,8 @@ async function startup({ id, version, rootURI }) {
 
 	Services.scriptloader.loadSubScript(rootURI + 'function/fs-mirror.js');
 	FS_Mirror.init({ id, version, rootURI });
+
+	await FS_Mirror.initLogger();
 	FS_Mirror.addToAllWindows();
 	await FS_Mirror.main();
 }
