@@ -148,7 +148,14 @@ FS_Mirror = {
 		link1.href = this.rootURI + 'style.css';
 		doc.documentElement.appendChild(link1);
 		this.storeAddedElement(link1);
-		this._addCollectionContextMenu(window);
+
+		try {
+			this._addCollectionContextMenu(window);
+			this.info("UI", "collection context menu items injected");
+		} catch (e) {
+			// IMPORTANT: não deixar quebrar o resto do addToWindow()
+			this.error("UI", "failed to inject collection context menu: " + String(e));
+		}
 
 		// Use Fluent for localization
 		window.MozXULElement.insertFTLIfNeeded("make-it-red.ftl");
@@ -310,50 +317,129 @@ FS_Mirror = {
 		const popup = this._findCollectionContextPopup(window);
 		if (!popup) return;
 
-		// Avoid duplicate insertion if addToWindow runs twice
-		if (doc.getElementById("fs-mirror-ctx-collection-root")) return;
+		// ---------- Sanitize ----------
+		let miScan = doc.getElementById("fs-mirror-ctx-sanitize-scan");
+		if (!miScan) {
+			miScan = doc.createXULElement("menuitem");
+			miScan.id = "fs-mirror-ctx-sanitize-scan";
+			miScan.setAttribute("label", "FS Mirror: Sanitize this collection");
 
-		const sep = doc.createXULElement("menuseparator");
-		sep.id = "fs-mirror-ctx-collection-sep";
+			miScan.addEventListener("command", async () => {
+				try {
+					this.info("UI", "sanitize scan triggered (selected collection)");
 
-		const mi = doc.createXULElement("menuitem");
-		mi.id = "fs-mirror-ctx-collection-root";
-		mi.setAttribute("label", "FS Mirror: Open root folder");
-		mi.addEventListener("command", async () => {
-			try {
-				const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true);
-				if (!rootDir) return this.warn("UI", "rootDir not set");
+					if (typeof FS_Sanitize === "undefined") {
+						this.error("UI", "FS_Sanitize is undefined (did you load sanitize.js?)");
+						return;
+					}
 
-				// Open folder in OS file manager (Zotero helper exists in Zotero)
-				// If this fails on your build, we can swap to an nsIFile + reveal()
-				Zotero.File.reveal(rootDir);
+					await FS_Sanitize.scanSelectedCollection({ api: this, window });
+				} catch (e) {
+					this.error("UI", `sanitize scan failed: ${String(e)}`);
+				}
+			});
 
-				this.info("UI", `open rootDir "${rootDir}"`);
-			} catch (e) {
-				this.error("UI", `open rootDir failed: ${String(e)}`);
-			}
-		});
+			popup.appendChild(miScan);
+			this.storeAddedElement(miScan);
+			this.info("UI", "menu item injected: sanitize");
+		} else {
+			this.debug("UI", "menu item exists: sanitize");
+		}
 
-		const miScan = doc.createXULElement("menuitem");
-		miScan.id = "fs-mirror-ctx-sanitize-scan";
-		miScan.setAttribute("label", "FS Mirror → Sanitize (dry scan) this collection");
-		miScan.addEventListener("command", async () => {
-			try {
-				this.info("UI", "sanitize scan triggered (selected collection)");
-				await FS_Sanitize.scanSelectedCollection({ api: this, window });
-			} catch (e) {
-				this.error("UI", `sanitize scan failed: ${String(e)}`);
-			}
-		});
+		// ---------- Separator ----------
+		let sep = doc.getElementById("fs-mirror-ctx-collection-sep");
+		if (!sep) {
+			sep = doc.createXULElement("menuseparator");
+			sep.id = "fs-mirror-ctx-collection-sep";
+			popup.appendChild(sep);
+			this.storeAddedElement(sep);
+			this.info("UI", "menu item injected: separator");
+		} else {
+			this.debug("UI", "menu item exists: separator");
+		}
 
-		popup.appendChild(miScan);
-		popup.appendChild(sep);
-		popup.appendChild(mi);
+		// ---------- Open root ----------
+		let mi = doc.getElementById("fs-mirror-ctx-collection-root");
+		if (!mi) {
+			mi = doc.createXULElement("menuitem");
+			mi.id = "fs-mirror-ctx-collection-root";
+			mi.setAttribute("label", "FS Mirror: Open root folder");
 
-		this.storeAddedElement(sep);
-		this.storeAddedElement(mi);
-		this.storeAddedElement(miScan);
+			mi.addEventListener("command", async () => {
+				try {
+					const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true);
+					if (!rootDir) return this.warn("UI", "rootDir not set");
+
+					Zotero.File.reveal(rootDir);
+					this.info("UI", `open rootDir "${rootDir}"`);
+				} catch (e) {
+					this.error("UI", `open rootDir failed: ${String(e)}`);
+				}
+			});
+
+			popup.appendChild(mi);
+			this.storeAddedElement(mi);
+			this.info("UI", "menu item injected: open-root");
+		} else {
+			this.debug("UI", "menu item exists: open-root");
+		}
 
 		this.info("UI", "collection context menu installed");
+	},
+	// -----------------------------
+	// FS ACTIONS (LOGS + ACTION)
+	// Semântica: chamamos de "MOVE", mas fazemos COPY (não apaga o original)
+	// -----------------------------
+
+	async fsEnsureParentDir(filePath) {
+		const parent = PathUtils.parent(filePath);
+		await IOUtils.makeDirectory(parent, { createAncestors: true });
+	},
+
+	async fsPathExists(p) {
+		try { return await IOUtils.exists(p); }
+		catch { return false; }
+	},
+
+	/**
+	 * "MOVE" no contrato, mas implementa COPY.
+	 * - Não sobrescreve destino
+	 * - Cria diretório pai
+	 * - Copia bytes (origem permanece)
+	 */
+	async fsMoveFile(src, dst) {
+		try {
+			this.info("FS", `MOVE (copy) "${src}" -> "${dst}"`);
+
+			if (!src || !dst) {
+				this.warn("FS", "MOVE skipped (src/dst missing)");
+				return { ok: false, reason: "missing_path" };
+			}
+
+			// Se origem não existe, não faz nada
+			if (!(await this.fsPathExists(src))) {
+				this.warn("FS", `MOVE skipped (src missing) "${src}"`);
+				return { ok: false, reason: "src_missing" };
+			}
+
+			// Não sobrescreve destino
+			if (await this.fsPathExists(dst)) {
+				this.warn("FS", `MOVE skipped (dst exists) "${dst}"`);
+				return { ok: false, reason: "dst_exists" };
+			}
+
+			// Garante diretório pai
+			await this.fsEnsureParentDir(dst);
+
+			// COPY real (byte-for-byte)
+			const bytes = await IOUtils.read(src);
+			await IOUtils.write(dst, bytes);
+
+			this.info("FS", `MOVE (copy) done "${dst}"`);
+			return { ok: true };
+		} catch (e) {
+			this.error("FS", `MOVE (copy) failed: ${String(e)}`);
+			return { ok: false, reason: "exception", error: String(e) };
+		}
 	}
 }
