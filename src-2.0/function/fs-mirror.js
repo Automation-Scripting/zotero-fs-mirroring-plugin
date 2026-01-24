@@ -32,6 +32,9 @@ FS_Mirror = {
 	addedElementIDs: [],
 	colPathCache: new Map(),
 
+	// key: itemID -> { lastPath, trashedPath, ts }
+	_itemFSState: new Map(),
+
 	init({ id, version, rootURI }) {
 		if (this.initialized) return;
 		this.id = id;
@@ -248,40 +251,43 @@ FS_Mirror = {
 						} else if (event === "delete" || event === "trash") {
 							for (const id of (ids || [])) await FS_CollectionsObserver.onDelete(this, id);
 						} else {
-							this.debug("NOTIFY", `ignored event=${event} type=${type}`);
+							this.debug("NOTIFY", `ignored collection event=${event}`);
 						}
 						return;
 					}
 
 					// -------------------------
-					// ITEM events  (NEW)
+					// ITEM events
 					// -------------------------
 					if (type === "item") {
-						// 1) sempre roda o classificador (Delete Collection vs Delete Collection and Items)
+						if (typeof FS_ItemsObserver === "undefined") {
+							this.warn("NOTIFY", "FS_ItemsObserver is undefined (did you load observer-items.js?)");
+							return;
+						}
+
+						// 1) classificador (só faz sentido em trash/delete)
 						if (event === "trash" || event === "delete") {
-							if (typeof FS_ItemsObserver !== "undefined") {
-								await FS_ItemsObserver.onTrashOrDelete(this, event, ids);
-							} else {
-								this.warn("NOTIFY", "FS_ItemsObserver is undefined (did you load observer-items.js?)");
-							}
+							await FS_ItemsObserver.onTrashOrDelete(this, event, ids);
 						}
 
-						// 2) ação: quando deletar attachment LINKED, deletar arquivo no FS
+						// 2) ações específicas
+						if (event === "trash") {
+							for (const id of (ids || [])) await FS_ItemsObserver.onItemTrash(this, id);
+							return;
+						}
+
+						if (event === "modify") {
+							for (const id of (ids || [])) await FS_ItemsObserver.onItemModify(this, id);
+							return;
+						}
+
 						if (event === "delete") {
-							if (typeof FS_ItemsObserver !== "undefined") {
-								for (const id of (ids || [])) {
-									await FS_ItemsObserver.onItemDelete(this, id);
-								}
-							}
-						} else if (event === "trash") {
-							// por enquanto só loga (evita apagar no trash, permite “undo” do Zotero)
-							if (typeof FS_ItemsObserver !== "undefined") {
-								for (const id of (ids || [])) {
-									await FS_ItemsObserver.onItemTrash(this, id);
-								}
-							}
+							for (const id of (ids || [])) await FS_ItemsObserver.onItemDelete(this, id);
+							return;
 						}
 
+						// outros eventos de item (index/refresh/redraw/add/...)
+						this.debug("NOTIFY", `ignored item event=${event}`);
 						return;
 					}
 
