@@ -126,11 +126,46 @@ var FS_Sanitize = {
         return [rootDir, ...segs].join("/").replace(/\/+/g, "/");
     },
 
-    _plannedPDFName(parentItem, att) {
+    // Dentro de var FS_Sanitize = { ... }
+
+    // garante extensão .pdf e evita nomes vazios
+    _ensurePDFExt(name) {
+        name = (name || "").trim();
+        if (!name) name = "Untitled";
+        return name.toLowerCase().endsWith(".pdf") ? name : (name + ".pdf");
+    },
+
+    // "Arquivo.pdf" -> "Arquivo (2).pdf", "Arquivo (3).pdf", ...
+    async _resolveCollision(plannedFolder, filename) {
+        filename = this._ensurePDFExt(filename);
+
+        // tenta direto
+        let candidate = `${plannedFolder}/${filename}`.replace(/\/+/g, "/");
+        if (!(await IOUtils.exists(candidate))) return candidate;
+
+        // separa base/ext
+        const m = filename.match(/^(.*?)(\.[^.]+)$/);
+        const base = (m?.[1] || filename).trim();
+        const ext = (m?.[2] || ".pdf").trim();
+
+        // começa em (2)
+        for (let i = 2; i < 10_000; i++) {
+            const f = `${base} (${i})${ext}`;
+            candidate = `${plannedFolder}/${f}`.replace(/\/+/g, "/");
+            if (!(await IOUtils.exists(candidate))) return candidate;
+        }
+
+        // se algo muito estranho acontecer
+        throw new Error(`could not resolve filename collision for "${filename}" in "${plannedFolder}"`);
+    },
+
+    _plannedPDFName(parentItem /*, att */) {
         const title = this._sanitizeName(parentItem.getField("title"));
         const year = (parentItem.getField("date") || "").match(/\b(19|20)\d{2}\b/)?.[0] || "";
         const base = year ? `${title} - ${year}` : title;
-        return `${base} [${att.key}].pdf`.replace(/\s+/g, " ").trim();
+
+        // SEM att.key
+        return this._ensurePDFExt(base.replace(/\s+/g, " ").trim());
     },
 
     _classifyAttachmentPath(path) {
@@ -359,8 +394,12 @@ var FS_Sanitize = {
                 try { path = await att.getFilePathAsync(); } catch { path = ""; }
 
                 const cls = this._classifyAttachmentPath(path);
+
                 const plannedName = this._plannedPDFName(item, att);
-                const plannedPath = plannedFolder ? `${plannedFolder}/${plannedName}`.replace(/\/+/g, "/") : null;
+                let plannedPath = null;
+                if (plannedFolder) {
+                    plannedPath = await this._resolveCollision(plannedFolder, plannedName);
+                }
 
                 api.info("SAN", `  pdf att id=${attID} key=${att.key} kind=${cls.kind} (${cls.reason})`);
                 api.info("SAN", `    zoteroPath="${path || "(missing)"}"`);
