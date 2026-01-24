@@ -1,15 +1,15 @@
 {
 	"manifest_version": 2,
-	"name": "File-system Mirroring",
+	"name": "Make It Red",
 	"version": "2.0",
-	"description": "Mirror the hierarchy to file system",
-	"homepage_url": "https://github.com/automations-scripting/zotero-fs-mirroring-plugin",
+	"description": "Makes everything red",
+	"homepage_url": "https://github.com/zotero/make-it-red",
 	"applications": {
 		"zotero": {
-			"id": "fs-mirroring@chanah.dev",
-			"update_url": "https://github.com/automations-scripting/zotero-fs-mirroring-plugin",
+			"id": "make-it-red@example.com",
+			"update_url": "https://zotero-download.s3.amazonaws.com/tmp/make-it-red/updates-2.0.json",
 			"strict_min_version": "7.0",
-			"strict_max_version": "7.1.*"
+			"strict_max_version": "8.*"
 		}
 	}
 }

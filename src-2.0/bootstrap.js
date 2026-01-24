@@ -1,41 +1,42 @@
-/* global Zotero, Services */
+var FS_Mirror;
 
-var FSMirror;
-
-function _log(msg) {
-  Zotero.debug(`FSMirror/bootstrap: ${msg}`);
+function log(msg) {
+	Zotero.debug("Make It Red: " + msg);
 }
 
 function install() {
-  _log("install()");
+	log("Installed 2.0");
 }
 
 async function startup({ id, version, rootURI }) {
-  _log(`startup() id=${id} version=${version}`);
+	log("Starting 2.0");
 
-  // carrega módulos
-  Services.scriptloader.loadSubScript(rootURI + "fs.js");
-  Services.scriptloader.loadSubScript(rootURI + "mirror_collections.js");
-  Services.scriptloader.loadSubScript(rootURI + "fsmirror.js");
+	Zotero.PreferencePanes.register({
+		pluginID: 'make-it-red@example.com',
+		src: rootURI + 'preferences.xhtml',
+		scripts: [rootURI + 'preferences.js']
+	});
 
-  FSMirror.init({ id, version, rootURI });
-  await FSMirror.start();
+	Services.scriptloader.loadSubScript(rootURI + 'make-it-red.js');
+	FS_Mirror.init({ id, version, rootURI });
+	FS_Mirror.addToAllWindows();
+	await FS_Mirror.main();
 }
 
 function onMainWindowLoad({ window }) {
-  FSMirror?.onMainWindowLoad?.(window);
+	FS_Mirror.addToWindow(window);
 }
 
 function onMainWindowUnload({ window }) {
-  FSMirror?.onMainWindowUnload?.(window);
+	FS_Mirror.removeFromWindow(window);
 }
 
 function shutdown() {
-  _log("shutdown()");
-  FSMirror?.stop?.();
-  FSMirror = undefined;
+	log("Shutting down 2.0");
+	FS_Mirror.removeFromAllWindows();
+	FS_Mirror = undefined;
 }
 
 function uninstall() {
-  _log("uninstall()");
+	log("Uninstalled 2.0");
 }
