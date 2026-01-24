@@ -90,6 +90,10 @@ FS_Mirror = {
 		this.log(`Host is ${host}`);
 
 		// Retrieve a global pref
-		this.log(`Intensity is ${Zotero.Prefs.get('extensions.make-it-red.intensity', true)}`);
-	},
-};
+		this.log(`[Preferences] Root dir: ${Zotero.Prefs.get('extensions.fs-mirror.rootDir', true)}`);
+		this.log(`[Preferences] Logs dir: ${Zotero.Prefs.get('extensions.fs-mirror.logsDir', true)}`);
+		this.log(`[Preferences] Trash folder: ${Zotero.Prefs.get('extensions.fs-mirror.safeTrashDirName', true)}`);
+		this.log(`[Preferences] Debug mode: ${Zotero.Prefs.get('extensions.fs-mirror.debug', true)}`);
+		this.log(`[Preferences] Internal logs: ${Zotero.Prefs.get('extensions.fs-mirror.echoToZotero', true)}`);
+	}
+}
