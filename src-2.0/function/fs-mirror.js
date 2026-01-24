@@ -30,6 +30,7 @@ FS_Mirror = {
 	rootURI: null,
 	initialized: false,
 	addedElementIDs: [],
+	colPathCache: new Map(),
 
 	init({ id, version, rootURI }) {
 		if (this.initialized) return;
@@ -147,6 +148,7 @@ FS_Mirror = {
 		link1.href = this.rootURI + 'style.css';
 		doc.documentElement.appendChild(link1);
 		this.storeAddedElement(link1);
+		this._addCollectionContextMenu(window);
 
 		// Use Fluent for localization
 		window.MozXULElement.insertFTLIfNeeded("make-it-red.ftl");
@@ -185,7 +187,7 @@ FS_Mirror = {
 		for (let id of this.addedElementIDs) {
 			doc.getElementById(id)?.remove();
 		}
-		doc.querySelector('[href="make-it-red.ftl"]').remove();
+		doc.querySelector('[href="make-it-red.ftl"]')?.remove();
 	},
 
 	removeFromAllWindows() {
@@ -236,8 +238,15 @@ FS_Mirror = {
 						for (const id of (ids || [])) {
 							await FS_CollectionsObserver.onAdd(this, id);
 						}
+					} else if (event === "modify") {
+						for (const id of (ids || [])) {
+							await FS_CollectionsObserver.onModify(this, id);
+						}
+					} else if (event === "delete" || event === "trash") {
+						for (const id of (ids || [])) {
+							await FS_CollectionsObserver.onDelete(this, id);
+						}
 					} else {
-						// por enquanto só loga os outros
 						this.debug("NOTIFY", `ignored event=${event} type=${type}`);
 					}
 				} catch (e) {
@@ -260,5 +269,77 @@ FS_Mirror = {
 		Zotero.Notifier.unregisterObserver(this._notifierID);
 		this.info("NOTIFY", `unregistered notifierID=${this._notifierID}`);
 		this._notifierID = null;
+	},
+	// --- Context menu helpers (Collection Tree) ---
+
+	_findCollectionContextPopup(window) {
+		const doc = window.document;
+
+		// Strategy: pick the menupopup that contains "New Subcollection..." and "Rename Collection"
+		for (const popup of doc.querySelectorAll("menupopup")) {
+			// Some popups may not be connected yet
+			const items = popup.querySelectorAll("menuitem");
+			if (!items || !items.length) continue;
+
+			let hasNewSub = false;
+			let hasRename = false;
+
+			for (const mi of items) {
+				const label = (mi.getAttribute("label") || "").toLowerCase();
+				const l10nId = (mi.getAttribute("data-l10n-id") || "").toLowerCase();
+
+				// We accept either hard labels or l10n ids
+				if (label.includes("new subcollection") || l10nId.includes("new-subcollection")) hasNewSub = true;
+				if (label.includes("rename collection") || l10nId.includes("rename-collection")) hasRename = true;
+
+				if (hasNewSub && hasRename) break;
+			}
+
+			if (hasNewSub && hasRename) {
+				this.debug("UI", `found collection context menupopup id="${popup.id || "(no id)"}"`);
+				return popup;
+			}
+		}
+
+		this.warn("UI", "collection context menupopup not found");
+		return null;
+	},
+
+	_addCollectionContextMenu(window) {
+		const doc = window.document;
+		const popup = this._findCollectionContextPopup(window);
+		if (!popup) return;
+
+		// Avoid duplicate insertion if addToWindow runs twice
+		if (doc.getElementById("fs-mirror-ctx-collection-root")) return;
+
+		const sep = doc.createXULElement("menuseparator");
+		sep.id = "fs-mirror-ctx-collection-sep";
+
+		const mi = doc.createXULElement("menuitem");
+		mi.id = "fs-mirror-ctx-collection-root";
+		mi.setAttribute("label", "FS Mirror: Open root folder");
+		mi.addEventListener("command", async () => {
+			try {
+				const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true);
+				if (!rootDir) return this.warn("UI", "rootDir not set");
+
+				// Open folder in OS file manager (Zotero helper exists in Zotero)
+				// If this fails on your build, we can swap to an nsIFile + reveal()
+				Zotero.File.reveal(rootDir);
+
+				this.info("UI", `open rootDir "${rootDir}"`);
+			} catch (e) {
+				this.error("UI", `open rootDir failed: ${String(e)}`);
+			}
+		});
+
+		popup.appendChild(sep);
+		popup.appendChild(mi);
+
+		this.storeAddedElement(sep);
+		this.storeAddedElement(mi);
+
+		this.info("UI", "collection context menu installed");
 	}
 }
