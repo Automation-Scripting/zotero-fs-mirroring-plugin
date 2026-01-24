@@ -20,6 +20,7 @@ async function startup({ id, version, rootURI }) {
 
 	Services.scriptloader.loadSubScript(rootURI + 'function/fs-mirror.js');
 	Services.scriptloader.loadSubScript(rootURI + 'function/observer-collections.js');
+	Services.scriptloader.loadSubScript(rootURI + 'function/sanitize.js');
 	FS_Mirror.init({ id, version, rootURI });
 
 	await FS_Mirror.initLogger();

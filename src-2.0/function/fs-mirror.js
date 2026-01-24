@@ -334,11 +334,25 @@ FS_Mirror = {
 			}
 		});
 
+		const miScan = doc.createXULElement("menuitem");
+		miScan.id = "fs-mirror-ctx-sanitize-scan";
+		miScan.setAttribute("label", "FS Mirror → Sanitize (dry scan) this collection");
+		miScan.addEventListener("command", async () => {
+			try {
+				this.info("UI", "sanitize scan triggered (selected collection)");
+				await FS_Sanitize.scanSelectedCollection({ api: this, window });
+			} catch (e) {
+				this.error("UI", `sanitize scan failed: ${String(e)}`);
+			}
+		});
+
+		popup.appendChild(miScan);
 		popup.appendChild(sep);
 		popup.appendChild(mi);
 
 		this.storeAddedElement(sep);
 		this.storeAddedElement(mi);
+		this.storeAddedElement(miScan);
 
 		this.info("UI", "collection context menu installed");
 	}
