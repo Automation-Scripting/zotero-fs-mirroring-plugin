@@ -1,7 +1,8 @@
+/** bootstrap.js */
 var FS_Mirror;
 
 function log(msg) {
-	Zotero.debug("Make It Red: " + msg);
+	Zotero.debug("FS Mirror: " + msg);
 }
 
 function install() {
@@ -12,12 +13,12 @@ async function startup({ id, version, rootURI }) {
 	log("Starting 2.0");
 
 	Zotero.PreferencePanes.register({
-		pluginID: 'make-it-red@example.com',
+		pluginID: 'fs-mirror@chanah.dev',
 		src: rootURI + 'preferences.xhtml',
 		scripts: [rootURI + 'preferences.js']
 	});
 
-	Services.scriptloader.loadSubScript(rootURI + 'make-it-red.js');
+	Services.scriptloader.loadSubScript(rootURI + 'function/fs-mirror.js');
 	FS_Mirror.init({ id, version, rootURI });
 	FS_Mirror.addToAllWindows();
 	await FS_Mirror.main();

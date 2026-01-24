@@ -1,13 +1,13 @@
 {
 	"manifest_version": 2,
-	"name": "Make It Red",
+	"name": "FS Mirror",
 	"version": "2.0",
-	"description": "Makes everything red",
-	"homepage_url": "https://github.com/zotero/make-it-red",
+	"description": "Mirrors FS Hiearchy",
+	"homepage_url": "https://github.com/automations-scripting/zotero-fs-mirroring-plugin",
 	"applications": {
 		"zotero": {
-			"id": "make-it-red@example.com",
-			"update_url": "https://zotero-download.s3.amazonaws.com/tmp/make-it-red/updates-2.0.json",
+			"id": "fs-mirror@chanah.dev",
+			"update_url": "https://github.com/automations-scripting/zotero-fs-mirroring-plugin",
 			"strict_min_version": "7.0",
 			"strict_max_version": "8.*"
 		}

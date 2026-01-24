@@ -1,3 +1,5 @@
+/** fs-mirror.js */
+
 FS_Mirror = {
 	id: null,
 	version: null,
@@ -14,7 +16,7 @@ FS_Mirror = {
 	},
 
 	log(msg) {
-		Zotero.debug("Make It Red: " + msg);
+		Zotero.debug("FS Mirror: " + msg);
 	},
 
 	addToWindow(window) {
