@@ -1,7 +1,7 @@
 var FS_Mirror;
 
 function log(msg) {
-	Zotero.debug("Make It Red: " + msg);
+	Zotero.debug("FS Mirror: " + msg);
 }
 
 function install() {

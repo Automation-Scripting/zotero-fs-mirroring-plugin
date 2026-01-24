@@ -14,7 +14,7 @@ FS_Mirror = {
 	},
 
 	log(msg) {
-		Zotero.debug("Make It Red: " + msg);
+		Zotero.debug("FS Mirror: " + msg);
 	},
 
 	addToWindow(window) {
