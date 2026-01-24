@@ -267,12 +267,8 @@ var FS_ItemsObserver = {
 
         api.info("ITEM", `trash(parent) id=${id} attachments=[${attIDs.join(",")}]`);
 
-        for (const attID of attIDs) {
-            try {
-                await this._trashOneAttachment(api, attID);
-            } catch (e) {
-                api.error("ITEM", `trash(parent) failed attID=${attID}: ${String(e)}`);
-            }
+        for (const attID of atts) {
+            await FS_ItemsObserver.onItemTrash(api, attID);
         }
     },
 
