@@ -16,7 +16,7 @@ FS_Mirror = {
 	},
 
 	log(msg) {
-		Zotero.debug("FS Mirror: " + msg);
+		Zotero.debug("[FS Mirror]: " + msg);
 	},
 
 	addToWindow(window) {
