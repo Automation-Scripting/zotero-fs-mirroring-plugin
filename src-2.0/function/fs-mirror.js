@@ -301,7 +301,7 @@ FS_Mirror = {
 
 		this._notifierID = Zotero.Notifier.registerObserver(
 			observer,
-			["collection", "item"],   // <<< IMPORTANT: agora observa item também
+			["collection", "item"],
 			"fs-mirror"
 		);
 

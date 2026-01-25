@@ -3,29 +3,14 @@
 var IOUtils = globalThis.IOUtils;
 var PathUtils = globalThis.PathUtils;
 
-// ------------------------------
-// helpers (top-level, fora do objeto)
-// ------------------------------
+// --------------------
+// helpers (top-level)
+// --------------------
 function _norm(p) { return String(p || "").replace(/\/+/g, "/"); }
-
-function _isProbablyStored(p) {
-    const s = _norm(p);
-    return s.includes("/storage/"); // não mexer em storage do Zotero aqui
-}
-
-function _looksAbsolute(p) {
-    const s = _norm(p);
-    return s.startsWith("/");
-}
-
-function _baseName(p) {
-    const s = _norm(p);
-    return s.split("/").pop() || "";
-}
-
-function _parentDir(p) {
-    return PathUtils.parent(_norm(p));
-}
+function _looksAbsolute(p) { return _norm(p).startsWith("/"); }
+function _isProbablyStored(p) { return _norm(p).includes("/storage/"); } // não mexer em storage do Zotero
+function _baseName(p) { const s = _norm(p); return s.split("/").pop() || ""; }
+function _parentDir(p) { return PathUtils.parent(_norm(p)); }
 
 async function _exists(p) {
     try { return await IOUtils.exists(_norm(p)); } catch { return false; }
@@ -35,17 +20,17 @@ async function _ensureDir(p) {
     return IOUtils.makeDirectory(_norm(p), { createAncestors: true });
 }
 
-function _isAttachmentItem(item) {
-    if (!item) return false;
-    if (typeof item.isAttachment === "function") return !!item.isAttachment();
-    return !!item.isAttachment;
+async function _copyFile(src, dst) {
+    src = _norm(src); dst = _norm(dst);
+    const bytes = await IOUtils.read(src);
+    await _ensureDir(_parentDir(dst));
+    await IOUtils.write(dst, bytes);
 }
 
-function _isInTrash(item) {
-    if (!item) return false;
-    if (typeof item.isInTrash === "function") return !!item.isInTrash();
-    if (typeof item.isInTrash === "boolean") return item.isInTrash;
-    return false;
+async function _moveFile(src, dst) {
+    // move real: copy + remove
+    await _copyFile(src, dst);
+    try { await IOUtils.remove(_norm(src)); } catch { }
 }
 
 // Regra de colisão: se dst existe -> (2), (3), ...
@@ -64,26 +49,57 @@ async function _uniquePath(dst) {
         const cand = _norm(`${dir}/${stem} (${i})${ext}`);
         if (!(await _exists(cand))) return cand;
     }
-    return dst;
+    return dst; // fallback improvável
 }
 
-async function _copyFile(src, dst) {
-    const bytes = await IOUtils.read(_norm(src));
-    await _ensureDir(_parentDir(dst));
-    await IOUtils.write(_norm(dst), bytes);
+function _isAttachmentItem(item) {
+    if (!item) return false;
+    if (typeof item.isAttachment === "function") return !!item.isAttachment();
+    return !!item.isAttachment;
 }
 
-async function _moveFile(src, dst) {
-    // move "real": copy + remove
-    await _copyFile(src, dst);
-    try { await IOUtils.remove(_norm(src)); } catch { }
+function _isInTrash(item) {
+    if (!item) return false;
+    if (typeof item.isInTrash === "function") return !!item.isInTrash();
+    if (typeof item.isInTrash === "boolean") return item.isInTrash;
+    return false;
 }
 
-// Atualiza o attachment LINKED pra apontar para outro arquivo
 async function _setLinkedAttachmentPath(att, newPath) {
-    // Para linked attachments, o caminho fica no field "path"
-    att.setField("path", _norm(newPath));
-    await att.saveTx();
+    const p = _norm(newPath);
+
+    // 1) Tenta APIs "boas" se existirem nesse build
+    try {
+        if (typeof att.setFilePath === "function") {
+            att.setFilePath(p);
+            if (typeof att.saveTx === "function") await att.saveTx();
+            return;
+        }
+        if (typeof att.setFilePathAsync === "function") {
+            await att.setFilePathAsync(p);
+            if (typeof att.saveTx === "function") await att.saveTx();
+            return;
+        }
+        if ("attachmentPath" in att) {
+            att.attachmentPath = p;
+            if (typeof att.saveTx === "function") await att.saveTx();
+            return;
+        }
+    } catch (e) {
+        // cai pro fallback abaixo
+    }
+
+    // 2) Fallback robusto: atualiza direto a tabela de attachments
+    //    (é aqui que o path de LINKED attachment vive)
+    await Zotero.DB.queryAsync(
+        "UPDATE itemAttachments SET path=? WHERE itemID=?",
+        [p, att.id]
+    );
+
+    // Recarrega o item na memória (se disponível)
+    try {
+        if (typeof att.reload === "function") await att.reload();
+    } catch { }
 }
 
 function _trashDestForLinked({ rootDir, trashName, attKey, filename }) {
@@ -92,30 +108,31 @@ function _trashDestForLinked({ rootDir, trashName, attKey, filename }) {
     return _norm(`${base}/${tname}/LINKED_TRASH/${attKey}/${filename}`);
 }
 
-// ------------------------------
-// FS_ItemsObserver
-// ------------------------------
+// --------------------
+// Observer
+// --------------------
 var FS_ItemsObserver = {
 
     // ------------------------------------------------------------------
-    // Seu classificador original (mantém)
+    // classificador original (mantém)
     // ------------------------------------------------------------------
     async onTrashOrDelete(api, event, ids) {
         const now = Date.now();
         if (!api._pendingCollectionDeletes || api._pendingCollectionDeletes.size === 0) return;
 
+        // expira trackers
         for (const [colID, rec] of api._pendingCollectionDeletes.entries()) {
             if (now - rec.ts <= api._pendingTTLms) continue;
 
             if (rec.trashedItems.size === 0 && rec.deletedItems.size === 0) {
-                api.info(
-                    "COL",
+                api.info("COL",
                     `classify colID=${colID} => "Delete Collection (only)" (0 items trashed/deleted of ${rec.itemIDs.size})`
                 );
             }
             api._pendingCollectionDeletes.delete(colID);
         }
 
+        // marca itens afetados
         for (const [colID, rec] of api._pendingCollectionDeletes.entries()) {
             if (now - rec.ts > api._pendingTTLms) continue;
 
@@ -129,8 +146,7 @@ var FS_ItemsObserver = {
             const deletedN = rec.deletedItems.size;
 
             if (trashedN || deletedN) {
-                api.info(
-                    "COL",
+                api.info("COL",
                     `classify colID=${colID} => "Delete Collection and Items" (items trashed=${trashedN} deleted=${deletedN} of ${rec.itemIDs.size})`
                 );
             }
@@ -138,7 +154,7 @@ var FS_ItemsObserver = {
     },
 
     // ------------------------------------------------------------------
-    // cache (pra lidar com delete "missing" e restore)
+    // cache (pra lidar com delete "missing")
     // ------------------------------------------------------------------
     _ensureCache(api) {
         if (!api._itemFSState) api._itemFSState = new Map(); // id -> { lastPath, trashedPath, attKey, ts }
@@ -156,7 +172,7 @@ var FS_ItemsObserver = {
     },
 
     // ------------------------------------------------------------------
-    // PRIVATE: trash de UM attachment linked (sob rootDir)
+    // private: trash de UM attachment (reutilizável)
     // ------------------------------------------------------------------
     async _trashOneAttachment(api, attID) {
         const att = await Zotero.Items.getAsync(attID);
@@ -168,7 +184,6 @@ var FS_ItemsObserver = {
 
         api.info("ITEM", `trash(att) id=${attID} key=${att.key} path="${path}"`);
 
-        // Só mexer em linked absoluto, fora de /storage/
         if (!_looksAbsolute(path)) return;
         if (_isProbablyStored(path)) return;
 
@@ -176,62 +191,35 @@ var FS_ItemsObserver = {
         const trashName = Zotero.Prefs.get("extensions.fs-mirror.safeTrashDirName", true) || "_FSMirror_Trash";
         if (!rootDir) return;
 
-        // Guardrail: só opera dentro do rootDir
-        if (!path.startsWith(_norm(rootDir))) return;
+        const rootN = _norm(rootDir);
+        if (!path.startsWith(rootN)) return;
 
         const filename = _baseName(path) || `${att.key}.pdf`;
-        const dst0 = _trashDestForLinked({ rootDir, trashName, attKey: att.key, filename });
+        const dst0 = _trashDestForLinked({ rootDir: rootN, trashName, attKey: att.key, filename });
         const dst = await _uniquePath(dst0);
 
-        // cache por attID
+        // cache ANTES
         this._putCache(api, attID, { lastPath: path, trashedPath: dst, attKey: att.key });
 
+        // move + update path (com rollback se update falhar)
         api.info("ITEM", `ACTION: move linked -> trash "${path}" -> "${dst}"`);
         await _moveFile(path, dst);
 
-        api.info("ITEM", `TRASH: before saveTx inTrash=${item.isInTrash?.()} path="${path}" -> "${dst}"`);
-
-        item.setField("path", dst);
-        await item.saveTx();
-
-        api.info("ITEM", `TRASH: after saveTx inTrash=${item.isInTrash?.()} path="${dst}"`);
-
-        // await _setLinkedAttachmentPath(att, dst);
-        // api.info("ITEM", `ACTION: updated attachment path -> "${dst}"`);
-    },
-
-    // ------------------------------------------------------------------
-    // PRIVATE: restore de UM attachment (quando sai do trash)
-    // ------------------------------------------------------------------
-    async _restoreOneAttachment(api, attID, attItem) {
-        const st = this._getCache(api, attID);
-        if (!st || !st.trashedPath || !st.lastPath) return;
-
-        const from = _norm(st.trashedPath);
-        const to0 = _norm(st.lastPath);
-
-        // Se o arquivo não existe no trash, limpa trashedPath e sai
-        if (!(await _exists(from))) {
-            this._putCache(api, attID, { trashedPath: null });
-            return;
+        try {
+            await _setLinkedAttachmentPath(att, dst);
+            api.info("ITEM", `ACTION: updated attachment path -> "${dst}"`);
+        } catch (e) {
+            api.error("ITEM", `trash(att) path-update failed, rolling back: ${String(e)}`);
+            // rollback pra não deixar o Zotero apontando pro nada
+            try { await _moveFile(dst, path); } catch { }
+            throw e;
         }
-
-        // Se o destino original já existe, aplica regra de colisão
-        const to = await _uniquePath(to0);
-
-        api.info("ITEM", `RESTORE: move back "${from}" -> "${to}"`);
-        await _moveFile(from, to);
-
-        await _setLinkedAttachmentPath(attItem, to);
-        api.info("ITEM", `RESTORE: updated attachment path -> "${to}"`);
-
-        this._putCache(api, attID, { lastPath: to, trashedPath: null });
     },
 
     // ------------------------------------------------------------------
-    // AÇÃO: trash
-    // - Se for attachment: trash só ele
-    // - Se for metadado (item pai): trash de TODOS attachments linked (sob rootDir)
+    // EVENT: trash
+    // - se for attachment: trash do arquivo + update path
+    // - se for item pai: varre attachments e aplica em cada um
     // ------------------------------------------------------------------
     async onItemTrash(api, id) {
         const item = await Zotero.Items.getAsync(id);
@@ -250,73 +238,80 @@ var FS_ItemsObserver = {
 
         api.info("ITEM", `trash id=${id} key=${key} isAttachment=${!!isAtt} inTrash=${inTrash} path="${path}"`);
 
-        // Caso 1) trash de attachment
+        // Caso 1: trash do próprio attachment
         if (isAtt) {
-            try {
-                await this._trashOneAttachment(api, id);
-            } catch (e) {
-                api.error("ITEM", `trash(att) failed id=${id}: ${String(e)}`);
-            }
+            try { await this._trashOneAttachment(api, id); }
+            catch (e) { api.error("ITEM", `trash(att) failed id=${id}: ${String(e)}`); }
             return;
         }
 
-        // Caso 2) trash de metadado (item pai)
-        // -> varre attachments e trasha os linked sob rootDir
+        // Caso 2: trash do metadado (item pai)
         const attIDs = item.getAttachments?.() || [];
         if (!attIDs.length) return;
 
         api.info("ITEM", `trash(parent) id=${id} attachments=[${attIDs.join(",")}]`);
 
-        for (const attID of atts) {
-            await FS_ItemsObserver.onItemTrash(api, attID);
+        for (const attID of attIDs) {
+            try { await this._trashOneAttachment(api, attID); }
+            catch (e) { api.error("ITEM", `trash(parent) failed attID=${attID}: ${String(e)}`); }
         }
     },
 
     // ------------------------------------------------------------------
-    // AÇÃO: modify  (detecta restore: inTrash=false)
-    // Observação: o Zotero faz restore mudando flags e disparando modify.
+    // EVENT: modify
+    // Detecta restore: attachment saiu da lixeira (inTrash=false)
     // ------------------------------------------------------------------
     async onItemModify(api, id) {
         const item = await Zotero.Items.getAsync(id);
-        if (!item) return;
-
-        const isAtt = _isAttachmentItem(item);
-        if (!isAtt) return;
+        if (!item || !_isAttachmentItem(item)) return;
 
         const inTrash = _isInTrash(item);
+        if (inTrash) return; // ainda em trash, nada aqui
 
-        // Se está em trash, não faz nada aqui (onItemTrash já cuidou)
-        if (inTrash) return;
+        const st = this._getCache(api, id);
+        if (!st || !st.trashedPath || !st.lastPath) return;
 
-        // Restore: estava em trash, agora saiu
+        const from = _norm(st.trashedPath);
+        const to0 = _norm(st.lastPath);
+
+        if (!(await _exists(from))) {
+            // limpa para evitar ficar preso
+            this._putCache(api, id, { trashedPath: null });
+            return;
+        }
+
+        const to = await _uniquePath(to0);
+
         try {
-            await this._restoreOneAttachment(api, id, item);
+            api.info("ITEM", `RESTORE: move back "${from}" -> "${to}"`);
+            await _moveFile(from, to);
+            await _setLinkedAttachmentPath(item, to);
+            api.info("ITEM", `RESTORE: updated attachment path -> "${to}"`);
+
+            this._putCache(api, id, { lastPath: to, trashedPath: null });
         } catch (e) {
             api.error("ITEM", `restore failed id=${id}: ${String(e)}`);
         }
     },
 
     // ------------------------------------------------------------------
-    // AÇÃO: delete definitivo
-    // - Se item ainda existe e é attachment linked sob rootDir: remove arquivo
-    // - Se item vem missing: usa cache (trashedPath/lastPath)
+    // EVENT: delete definitivo
     // ------------------------------------------------------------------
     async onItemDelete(api, id) {
         let item = await Zotero.Items.getAsync(id);
-
         if (item) {
             const isAtt = _isAttachmentItem(item);
-
             let path = "";
             try { path = await item.getFilePathAsync(); } catch { }
             path = _norm(path);
 
             api.info("ITEM", `delete id=${id} isAttachment=${!!isAtt} path="${path}"`);
 
-            // Só deletar do FS se for linked sob rootDir e não storage
+            // Só mexe em linked dentro do rootDir
             if (isAtt && _looksAbsolute(path) && !_isProbablyStored(path)) {
                 const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true) || "";
-                if (rootDir && path.startsWith(_norm(rootDir))) {
+                const rootN = _norm(rootDir);
+                if (rootN && path.startsWith(rootN)) {
                     try {
                         if (await _exists(path)) {
                             await IOUtils.remove(path);
@@ -331,7 +326,7 @@ var FS_ItemsObserver = {
             api.info("ITEM", `delete id=${id} (missing) -> will use cache if available`);
         }
 
-        // missing (ou mesmo exists): tenta cache
+        // fallback via cache (quando chega missing)
         const st = this._getCache(api, id);
         if (!st) return;
 
@@ -339,10 +334,10 @@ var FS_ItemsObserver = {
         if (!candidate) return;
 
         const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true) || "";
-        if (!rootDir) return;
+        const rootN = _norm(rootDir);
+        if (!rootN) return;
 
-        // Guardrail: só apaga dentro do rootDir
-        if (!_norm(candidate).startsWith(_norm(rootDir))) return;
+        if (!String(candidate).startsWith(rootN)) return;
 
         try {
             if (await _exists(candidate)) {
