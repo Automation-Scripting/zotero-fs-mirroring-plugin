@@ -108,10 +108,56 @@ function _trashDestForLinked({ rootDir, trashName, attKey, filename }) {
     return _norm(`${base}/${tname}/LINKED_TRASH/${attKey}/${filename}`);
 }
 
+async function _removeFileIfExists(p) {
+    try {
+        p = _norm(p);
+        if (await _exists(p)) await IOUtils.remove(p);
+    } catch { }
+}
+
+async function _removeDirIfEmpty(dir) {
+    try {
+        dir = _norm(dir);
+        // Se não existe, nada
+        if (!(await _exists(dir))) return;
+
+        // IOUtils.getChildren() existe em builds recentes; fallback: tenta listar via PathUtils?
+        if (typeof IOUtils.getChildren !== "function") return;
+
+        const children = await IOUtils.getChildren(dir);
+        if (children && children.length === 0) {
+            await IOUtils.remove(dir); // remove dir vazio
+
+            // tenta remover o parent se também ficar vazio (limpa "attKey/")
+            const parent = _parentDir(dir);
+            if (parent && parent !== dir) {
+                const parentChildren = await IOUtils.getChildren(parent);
+                if (parentChildren && parentChildren.length === 0) {
+                    await IOUtils.remove(parent);
+                }
+            }
+        }
+    } catch { }
+}
+
 // --------------------
 // Observer
 // --------------------
 var FS_ItemsObserver = {
+
+    _ensureIgnore(api) {
+        if (!api._fsMirrorIgnoreDeleteIDs) api._fsMirrorIgnoreDeleteIDs = new Set();
+        return api._fsMirrorIgnoreDeleteIDs;
+    },
+    _markIgnoreDelete(api, id) {
+        this._ensureIgnore(api).add(Number(id));
+    },
+    _shouldIgnoreDelete(api, id) {
+        return this._ensureIgnore(api).has(Number(id));
+    },
+    _clearIgnoreDelete(api, id) {
+        this._ensureIgnore(api).delete(Number(id));
+    },
 
     async _restoreAttachmentFromNote(api, attItem) {
         if (!attItem || !_isAttachmentItem(attItem)) return false;
@@ -247,8 +293,32 @@ var FS_ItemsObserver = {
         const entry = arr[idx];
         arr.splice(idx, 1);
 
-        // se esvaziou, mantém a note (ou apaga se você quiser — por enquanto mantém)
-        await this._writeRestoreMapToNote(note, arr);
+        if (arr.length === 0) {
+            try {
+                // ✅ marca pra ignorar o delete event desse noteID
+                this._markIgnoreDelete(api, note.id);
+
+                // ✅ melhor: deferir a deleção pra fora do notifier callstack
+                setTimeout(async () => {
+                    try {
+                        if (typeof note.eraseTx === "function") await note.eraseTx();
+                        else if (typeof Zotero.Items.eraseTx === "function") await Zotero.Items.eraseTx(note.id);
+                        else await Zotero.DB.queryAsync("DELETE FROM items WHERE itemID=?", [note.id]);
+
+                        api.info("NOTE", `restore-map note deleted (empty) parent=${parentItemID} noteID=${note.id}`);
+                    } catch (e) {
+                        api.warn("NOTE", `restore-map note delete failed: ${String(e)}`);
+                    } finally {
+                        // limpa ignore (pra não crescer infinito)
+                        this._clearIgnoreDelete(api, note.id);
+                    }
+                }, 0);
+
+            } catch (e) {
+                await this._writeRestoreMapToNote(note, []);
+                api.warn("NOTE", `restore-map note delete scheduling failed; kept empty []: ${String(e)}`);
+            }
+        }
 
         api.info("NOTE", `restore-map pop parent=${parentItemID} attID=${attID}`);
         return entry;
@@ -411,6 +481,49 @@ var FS_ItemsObserver = {
         }
     },
 
+    async _restoreOneFromNote(api, att) {
+        if (!att || !_isAttachmentItem(att)) return false;
+        if (_isInTrash(att)) return false;
+
+        const parentItemID = att.parentItemID;
+        if (!parentItemID) return false;
+
+        const entry = await this._popRestoreEntry(api, {
+            parentItemID,
+            attID: att.id,
+            attKey: att.key
+        });
+
+        if (!entry || !entry.to || !entry.from) return false;
+
+        const from = _norm(entry.to);   // trash
+        const to0 = _norm(entry.from); // original
+
+        if (!(await _exists(from))) {
+            api.warn("ITEM", `RESTORE(note): trash file missing "${from}"`);
+            return true; // já não existe; consideramos resolvido pra não travar
+        }
+
+        const to = await _uniquePath(to0);
+
+        try {
+            api.info("ITEM", `RESTORE(note): move back "${from}" -> "${to}"`);
+            await _moveFile(from, to);
+            await _setLinkedAttachmentPath(att, to);
+            api.info("ITEM", `RESTORE(note): updated attachment path -> "${to}"`);
+
+            // limpa lixo: remove dir do attKey se vazio
+            await _removeDirIfEmpty(_parentDir(from)); // .../LINKED_TRASH/<attKey> (arquivo dentro)
+            // sincroniza cache (opcional)
+            this._putCache(api, att.id, { lastPath: to, trashedPath: null, attKey: att.key });
+
+            return true;
+        } catch (e) {
+            api.error("ITEM", `RESTORE(note) failed attID=${att.id}: ${String(e)}`);
+            return false;
+        }
+    },
+
     // ------------------------------------------------------------------
     // EVENT: modify
     // Detecta restore: attachment saiu da lixeira (inTrash=false)
@@ -422,13 +535,15 @@ var FS_ItemsObserver = {
         // Se ainda está no trash, não é restore
         if (_isInTrash(item)) return;
 
-        // Caso 1) attachment foi restaurado (raro na UI, mas ok)
+        // -----------------------------
+        // Caso A) modify do ATTACHMENT
+        // -----------------------------
         if (_isAttachmentItem(item)) {
-            // tenta note primeiro
-            const ok = await this._restoreAttachmentFromNote(api, item);
+            // 1) restore via NOTE (preferencial)
+            const ok = await this._restoreOneFromNote(api, item);
             if (ok) return;
 
-            // fallback cache (teu comportamento atual)
+            // 2) fallback cache
             const st = this._getCache(api, id);
             if (!st || !st.trashedPath || !st.lastPath) return;
 
@@ -447,6 +562,8 @@ var FS_ItemsObserver = {
                 await _moveFile(from, to);
                 await _setLinkedAttachmentPath(item, to);
                 api.info("ITEM", `RESTORE(cache): updated attachment path -> "${to}"`);
+
+                await _removeDirIfEmpty(_parentDir(from));
                 this._putCache(api, id, { lastPath: to, trashedPath: null });
             } catch (e) {
                 api.error("ITEM", `restore(cache) failed id=${id}: ${String(e)}`);
@@ -454,7 +571,9 @@ var FS_ItemsObserver = {
             return;
         }
 
-        // Caso 2) parent item restaurado (o seu caso real)
+        // -----------------------------
+        // Caso B) modify do PARENT (seu caso real do restore pela UI)
+        // -----------------------------
         const attIDs = item.getAttachments?.() || [];
         if (!attIDs.length) return;
 
@@ -463,9 +582,8 @@ var FS_ItemsObserver = {
         for (const attID of attIDs) {
             const att = await Zotero.Items.getAsync(attID);
             if (!att || !_isAttachmentItem(att)) continue;
-
-            // tenta restaurar pelo note (determinístico)
-            await this._restoreAttachmentFromNote(api, att);
+            // tenta restaurar cada um pelo note
+            await this._restoreOneFromNote(api, att);
         }
     },
 
@@ -473,7 +591,22 @@ var FS_ItemsObserver = {
     // EVENT: delete definitivo
     // ------------------------------------------------------------------
     async onItemDelete(api, id) {
+        // ✅ 0) se esse ID foi marcado (ex: note do restore-map), ignora
+        //     (isso cobre o caso em que o Zotero manda delete "missing" também)
+        if (this._shouldIgnoreDelete(api, id)) {
+            api.info("ITEM", `delete id=${id} ignored (marked)`);
+            this._clearIgnoreDelete(api, id);
+            return;
+        }
+
         let item = await Zotero.Items.getAsync(id);
+
+        // ✅ 1) se existe e é NOTE, ignora sempre (não é attachment)
+        if (item && typeof item.isNote === "function" && item.isNote()) {
+            api.info("ITEM", `delete id=${id} isNote=true (ignored)`);
+            return;
+        }
+
         if (item) {
             const isAtt = _isAttachmentItem(item);
             let path = "";
@@ -498,6 +631,14 @@ var FS_ItemsObserver = {
                 }
             }
         } else {
+            // ✅ 2) caso "missing": antes de cair pro cache, re-checa marked
+            //     (porque o marked pode ter sido setado e o item sumiu rápido)
+            if (this._shouldIgnoreDelete(api, id)) {
+                api.info("ITEM", `delete id=${id} (missing) ignored (marked)`);
+                this._clearIgnoreDelete(api, id);
+                return;
+            }
+
             api.info("ITEM", `delete id=${id} (missing) -> will use cache if available`);
         }
 
