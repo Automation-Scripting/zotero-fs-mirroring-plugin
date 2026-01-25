@@ -18,6 +18,16 @@ async function startup({ id, version, rootURI }) {
 		scripts: [rootURI + 'preferences.js']
 	});
 
+	// no startup(), antes de registrar observer/menu:
+	try {
+		globalThis.addEventListener?.("unhandledrejection", (ev) => {
+			Zotero.debug?.("[FS Mirror] UNHANDLED REJECTION: " + String(ev.reason));
+		});
+		globalThis.addEventListener?.("error", (ev) => {
+			Zotero.debug?.("[FS Mirror] GLOBAL ERROR: " + String(ev.error || ev.message));
+		});
+	} catch { }
+	
 	Services.scriptloader.loadSubScript(rootURI + 'function/fs-mirror.js');
 	Services.scriptloader.loadSubScript(rootURI + 'function/observer-collections.js');
 	Services.scriptloader.loadSubScript(rootURI + "function/observer-items.js");
