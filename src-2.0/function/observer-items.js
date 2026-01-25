@@ -113,6 +113,108 @@ function _trashDestForLinked({ rootDir, trashName, attKey, filename }) {
 // --------------------
 var FS_ItemsObserver = {
 
+    // -------------------------------
+    // NOTE-based restore map (parent item)
+    // -------------------------------
+    _noteHeader: "[FSMirror] linked-trash-map v1",
+
+    async _getOrCreateRestoreNote(api, parentItemID) {
+        const parent = await Zotero.Items.getAsync(parentItemID);
+        if (!parent) return null;
+
+        // procura note filha com nosso header
+        const noteIDs = parent.getNotes?.() || [];
+        for (const nid of noteIDs) {
+            const n = await Zotero.Items.getAsync(nid);
+            if (!n || n.isNote?.() !== true) continue;
+
+            const txt = n.getNote?.() || "";
+            if (String(txt).startsWith(this._noteHeader)) return n;
+        }
+
+        // cria note
+        const note = new Zotero.Item("note");
+        note.parentItemID = parentItemID;
+        note.setNote(`${this._noteHeader}\n[]`);
+        await note.saveTx();
+
+        api.info("NOTE", `created restore-map note for parentItemID=${parentItemID} noteID=${note.id}`);
+        return note;
+    },
+
+    async _readRestoreMapFromNote(noteItem) {
+        const raw = String(noteItem.getNote?.() || "");
+        const lines = raw.split("\n");
+        if (!lines.length) return [];
+
+        // Esperado:
+        // line0: header
+        // rest: JSON (array)
+        const json = lines.slice(1).join("\n").trim();
+        if (!json) return [];
+
+        try {
+            const arr = JSON.parse(json);
+            return Array.isArray(arr) ? arr : [];
+        } catch {
+            return [];
+        }
+    },
+
+    async _writeRestoreMapToNote(noteItem, arr) {
+        const body = JSON.stringify(arr, null, 2);
+        noteItem.setNote(`${this._noteHeader}\n${body}`);
+        await noteItem.saveTx();
+    },
+
+    async _upsertRestoreEntry(api, { parentItemID, attID, attKey, from, to }) {
+        const note = await this._getOrCreateRestoreNote(api, parentItemID);
+        if (!note) return;
+
+        const arr = await this._readRestoreMapFromNote(note);
+        const ts = new Date().toISOString();
+
+        // chave primária: attID (mais robusto); fallback por attKey
+        const idx = arr.findIndex(x => Number(x.attID) === Number(attID) || (x.attKey && x.attKey === attKey));
+
+        const entry = { attID: Number(attID), attKey: String(attKey || ""), from: _norm(from), to: _norm(to), ts };
+
+        if (idx >= 0) arr[idx] = entry;
+        else arr.push(entry);
+
+        await this._writeRestoreMapToNote(note, arr);
+        api.info("NOTE", `restore-map upsert parent=${parentItemID} attID=${attID} from="${entry.from}" to="${entry.to}"`);
+    },
+
+    async _popRestoreEntry(api, { parentItemID, attID, attKey }) {
+        const parent = await Zotero.Items.getAsync(parentItemID);
+        if (!parent) return null;
+
+        const noteIDs = parent.getNotes?.() || [];
+        let note = null;
+
+        for (const nid of noteIDs) {
+            const n = await Zotero.Items.getAsync(nid);
+            if (!n || n.isNote?.() !== true) continue;
+            const txt = n.getNote?.() || "";
+            if (String(txt).startsWith(this._noteHeader)) { note = n; break; }
+        }
+        if (!note) return null;
+
+        const arr = await this._readRestoreMapFromNote(note);
+        const idx = arr.findIndex(x => Number(x.attID) === Number(attID) || (attKey && x.attKey === attKey));
+        if (idx < 0) return null;
+
+        const entry = arr[idx];
+        arr.splice(idx, 1);
+
+        // se esvaziou, mantém a note (ou apaga se você quiser — por enquanto mantém)
+        await this._writeRestoreMapToNote(note, arr);
+
+        api.info("NOTE", `restore-map pop parent=${parentItemID} attID=${attID}`);
+        return entry;
+    },
+
     // ------------------------------------------------------------------
     // classificador original (mantém)
     // ------------------------------------------------------------------
@@ -208,6 +310,18 @@ var FS_ItemsObserver = {
         try {
             await _setLinkedAttachmentPath(att, dst);
             api.info("ITEM", `ACTION: updated attachment path -> "${dst}"`);
+
+            // guarda rota de volta no NOTE do item pai
+            const parentItemID = att.parentItemID;
+            if (parentItemID) {
+                await this._upsertRestoreEntry(api, {
+                    parentItemID,
+                    attID: att.id,
+                    attKey: att.key,
+                    from: path,
+                    to: dst
+                });
+            }
         } catch (e) {
             api.error("ITEM", `trash(att) path-update failed, rolling back: ${String(e)}`);
             // rollback pra não deixar o Zotero apontando pro nada
@@ -268,6 +382,42 @@ var FS_ItemsObserver = {
         const inTrash = _isInTrash(item);
         if (inTrash) return; // ainda em trash, nada aqui
 
+        // 1) tenta restore via NOTE do parent (persistente e determinístico)
+        const parentItemID = item.parentItemID;
+        if (parentItemID) {
+            const entry = await this._popRestoreEntry(api, {
+                parentItemID,
+                attID: id,
+                attKey: item.key
+            });
+
+            if (entry && entry.to && entry.from) {
+                const from = _norm(entry.to);   // onde está (trash)
+                const to0 = _norm(entry.from); // destino original
+
+                if (await _exists(from)) {
+                    const to = await _uniquePath(to0);
+
+                    try {
+                        api.info("ITEM", `RESTORE(note): move back "${from}" -> "${to}"`);
+                        await _moveFile(from, to);
+                        await _setLinkedAttachmentPath(item, to);
+                        api.info("ITEM", `RESTORE(note): updated attachment path -> "${to}"`);
+
+                        // sincroniza cache também (opcional, mas ajuda)
+                        this._putCache(api, id, { lastPath: to, trashedPath: null, attKey: item.key });
+                        return;
+                    } catch (e) {
+                        api.error("ITEM", `RESTORE(note) failed id=${id}: ${String(e)}`);
+                        // se falhou, você pode re-inserir o entry na NOTE (opcional)
+                    }
+                } else {
+                    api.warn("ITEM", `RESTORE(note): trash file missing "${from}" (nothing to move)`);
+                }
+            }
+        }
+
+        // 2) fallback: se não tinha NOTE (ou falhou), cai no cache (como já está)
         const st = this._getCache(api, id);
         if (!st || !st.trashedPath || !st.lastPath) return;
 
