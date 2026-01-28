@@ -405,7 +405,7 @@ var FS_ItemsObserver = {
         if (!rootDir) return;
 
         const rootN = _norm(rootDir);
-        if (!originalPath.startsWith(rootN)) return;
+        // if (!originalPath.startsWith(rootN)) return;
 
         const filename = _baseName(originalPath) || `${att.key}.pdf`;
         const dst0 = _trashDestForLinked({ rootDir: rootN, trashName, attKey: att.key, filename });

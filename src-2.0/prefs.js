@@ -14,4 +14,6 @@ pref("extensions.fs-mirror.safeTrashDirName", "_FSMirror_Trash");
 pref("extensions.fs-mirror.debug", true);
 
 // também escreve em Zotero.debug
-pref("extensions.fs-mirror.echoToZotero", true);   
+pref("extensions.fs-mirror.echoToZotero", true);
+
+pref("extensions.fs-mirror.sanitizeRecursive", true);

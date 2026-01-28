@@ -96,11 +96,143 @@ async function _hasLinkedToPlanned({ parentItem, plannedPath }) {
     return false;
 }
 
+function _trimSlash(s) {
+    return _norm(s).replace(/\/+$/, "");
+}
+
+function _getBaseAttachmentPath() {
+    // pref padrão do Zotero para Linked Attachment Base Directory
+    // (normalmente aparece como extensions.zotero.baseAttachmentPath no config editor)
+    return Zotero.Prefs.get("extensions.zotero.baseAttachmentPath", true) || "";
+}
+
+function _toZoteroLinkedPath(absPath) {
+    const base = _trimSlash(_getBaseAttachmentPath());
+    const p = _norm(absPath);
+
+    // se estiver sob a base, armazena relativo como attachments:<relpath>
+    if (base && p.startsWith(base + "/")) {
+        const rel = p.slice(base.length + 1); // remove "base/"
+        return `attachments:${rel}`;
+    }
+
+    // senão, absoluto mesmo
+    return p;
+}
 // ------------------------------------------------------------
 // Public module API
 // ------------------------------------------------------------
 
 var FS_Sanitize = {
+
+    // --- collection recursion helpers (keep ONE copy) ---
+    async _getChildCollections(collectionID) {
+        if (typeof Zotero.Collections.getByParent === "function") {
+            return Zotero.Collections.getByParent(collectionID) || [];
+        }
+        const all = Zotero.Collections.getAll?.() || [];
+        return all.filter(c => c && c.parentID === collectionID);
+    },
+
+    async _getDescendantCollections(rootCollectionID) {
+        const out = [];
+        const q = [rootCollectionID];
+        const seen = new Set([rootCollectionID]);
+
+        while (q.length) {
+            const curID = q.shift();
+            const kids = await this._getChildCollections(curID);
+            for (const c of kids) {
+                if (!c || seen.has(c.id)) continue;
+                seen.add(c.id);
+                out.push(c);
+                q.push(c.id);
+            }
+        }
+        return out;
+    },
+
+    // -------------------------
+    // ACTION 3: LINKED -> MOVE file to plannedPath + update attachment path
+    // -------------------------
+    async _moveLinkedAttachmentToPlanned({ api, att, linkedPath, plannedPath }) {
+        const parentItemID = att.parentItemID;
+
+        if (!parentItemID) {
+            api.warn("SAN", `linked att id=${att.id} has no parentItemID; skipping`);
+            return;
+        }
+        if (!linkedPath || !plannedPath) {
+            api.warn("SAN", `missing linked/planned path; skipping (linked="${linkedPath}" planned="${plannedPath}")`);
+            return;
+        }
+
+        const src = _norm(linkedPath);
+        const dst = _norm(plannedPath);
+
+        // idempotente: já está no destino
+        if (src === dst) {
+            api.info("SAN", `IDEMPOTENT: linked already at plannedPath "${dst}"`);
+            return;
+        }
+
+        // guardrail: se já existe um LINKED apontando para dst, não duplica
+        if (await _hasLinkedAttachmentPointingTo({ parentItemID, plannedPath: dst })) {
+            api.warn("SAN", `guardrail: another attachment already links to plannedPath; NOT moving "${src}" -> "${dst}"`);
+            return;
+        }
+
+        // existe no disco?
+        if (!(await _exists(src))) {
+            api.warn("SAN", `linked file missing on disk: "${src}" (skip move)`);
+            return;
+        }
+
+        // move físico
+        const dstDir = PathUtils.parent(dst);
+        await IOUtils.makeDirectory(dstDir, { createAncestors: true });
+
+        api.info("SAN", `ACTION: MOVE LINKED FILE "${src}" -> "${dst}"`);
+        try {
+            // se IOUtils.move existir no seu runtime, preferir:
+            if (IOUtils.move) {
+                await IOUtils.move(src, dst);
+            } else {
+                // fallback seguro: copy+remove
+                await IOUtils.copy(src, dst);
+                await IOUtils.remove(src);
+            }
+            api.info("SAN", `ACTION: MOVE OK -> "${dst}"`);
+        } catch (e) {
+            api.error("SAN", `MOVE failed: ${String(e)}`);
+            return;
+        }
+
+        // atualiza o attachment (o próprio LINKED)
+        const zotPath = _toZoteroLinkedPath(dst);
+
+        try {
+            // 1) Atualiza o campo certo do attachment
+            if ("attachmentPath" in att) {
+                att.attachmentPath = zotPath;   // ✅ o que o Zotero usa para linked paths
+            } else if ("path" in att) {
+                att.path = zotPath;             // fallback (em alguns contextos aparece assim)
+            } else {
+                throw new Error("attachment has no attachmentPath/path property");
+            }
+
+            await att.saveTx();
+
+            // 2) Prova (resolved)
+            let resolved = "";
+            try { resolved = await att.getFilePathAsync(); } catch { }
+            api.info("SAN", `ACTION: updated LINKED attKey=${att.key} attachmentPath="${zotPath}" resolved="${resolved || "(n/a)"}"`);
+        } catch (e) {
+            api.error("SAN", `update attachment path failed attKey=${att.key}: ${String(e)}`);
+            api.warn("SAN", `  file was moved, but Zotero link may still point to old path.`);
+        }
+    },
+
     // -------------------------
     // helpers (object scope)
     // -------------------------
@@ -191,7 +323,7 @@ var FS_Sanitize = {
     // ACTION 1: STORED -> COPY to plannedPath + create LINKED attachment
     // (keeps original STORED intact)
     // -------------------------
-    async _copyAndAddLinkedAttachment({ api, att, storedPath, plannedPath }) {
+    async _copyAndAddLinkedAttachment({ api, att, storedPath, plannedPath, plannedPathCanonical = null }) {
         const parentItemID = att.parentItemID;
 
         if (!parentItemID) {
@@ -203,39 +335,63 @@ var FS_Sanitize = {
             return;
         }
 
-        // Guard rail: já existe link para plannedPath
-        if (await _hasLinkedAttachmentPointingTo({ parentItemID, plannedPath })) {
-            api.info("SAN", `IDEMPOTENT: already linked -> "${plannedPath}" (skip copy+create)`);
+        const dst = _norm(plannedPath);
+        const dstCan = plannedPathCanonical ? _norm(plannedPathCanonical) : null;
+
+        // ------------------------------------------------------------
+        // Guardrail forte: se já existe LINKED -> CANÔNICO, não faz nada
+        // (isso é o que evita o "(2)" quando está tudo certo)
+        // ------------------------------------------------------------
+        if (dstCan) {
+            if (await _hasLinkedAttachmentPointingTo({ parentItemID, plannedPath: dstCan })) {
+                api.info("SAN", `IDEMPOTENT: already linked -> canonical "${dstCan}" (skip copy+create)`);
+                return;
+            }
+        }
+
+        // Guardrail normal: se já existe LINKED -> dst (o que foi escolhido), não faz nada
+        if (await _hasLinkedAttachmentPointingTo({ parentItemID, plannedPath: dst })) {
+            api.info("SAN", `IDEMPOTENT: already linked -> "${dst}" (skip copy+create)`);
             return;
         }
 
-        // 1) COPY físico
-        const dstExists = await IOUtils.exists(plannedPath);
+        // ------------------------------------------------------------
+        // 1) COPY físico (idempotente)
+        // ------------------------------------------------------------
+        const dstExists = await IOUtils.exists(dst);
         if (dstExists) {
-            api.info("SAN", `IDEMPOTENT: dst already exists (skip copy) "${plannedPath}"`);
+            api.info("SAN", `IDEMPOTENT: dst already exists (skip copy) "${dst}"`);
         } else {
-            const parentDir = PathUtils.parent(plannedPath);
+            const parentDir = PathUtils.parent(dst);
             await IOUtils.makeDirectory(parentDir, { createAncestors: true });
 
-            api.info("SAN", `ACTION: COPY "${storedPath}" -> "${plannedPath}"`);
-            await IOUtils.copy(storedPath, plannedPath);
-            api.info("SAN", `ACTION: COPY OK -> "${plannedPath}"`);
+            api.info("SAN", `ACTION: COPY "${storedPath}" -> "${dst}"`);
+            await IOUtils.copy(storedPath, dst);
+            api.info("SAN", `ACTION: COPY OK -> "${dst}"`);
         }
 
         // Re-checa para evitar duplicata se algo apareceu no meio
-        if (await _hasLinkedAttachmentPointingTo({ parentItemID, plannedPath })) {
-            api.info("SAN", `IDEMPOTENT: link appeared after copy (skip create) "${plannedPath}"`);
+        if (dstCan) {
+            if (await _hasLinkedAttachmentPointingTo({ parentItemID, plannedPath: dstCan })) {
+                api.info("SAN", `IDEMPOTENT: link to canonical appeared after copy (skip create) "${dstCan}"`);
+                return;
+            }
+        }
+        if (await _hasLinkedAttachmentPointingTo({ parentItemID, plannedPath: dst })) {
+            api.info("SAN", `IDEMPOTENT: link appeared after copy (skip create) "${dst}"`);
             return;
         }
 
+        // ------------------------------------------------------------
         // 2) Criar attachment LINKED
+        // ------------------------------------------------------------
         const oldTitle = att.getField?.("title") || "PDF";
         const linkedTitle = /\(linked\)$/i.test(oldTitle) ? oldTitle : `${oldTitle} (linked)`;
 
-        api.info("SAN", `ACTION: create LINKED attachment title="${linkedTitle}" -> "${plannedPath}"`);
+        api.info("SAN", `ACTION: create LINKED attachment title="${linkedTitle}" -> "${dst}"`);
 
         const newAttachment = await Zotero.Attachments.linkFromFile({
-            file: plannedPath,
+            file: dst,
             parentItemID,
             title: linkedTitle
         });
@@ -340,100 +496,190 @@ var FS_Sanitize = {
             return;
         }
 
-        api.info("SAN", `scan collection start id=${col.id} key=${col.key} name="${col.name}" rootDir="${rootDir || "(not set)"}"`);
-
-        const chain = await this._collectionChainByID(col.id);
-        const chainStr = chain.map(x => `${x.name}(${x.key})`).join(" > ");
-        const plannedFolder = rootDir ? this._collectionDesiredPath(rootDir, chain) : null;
-
-        api.info("SAN", `  col chain: ${chainStr}`);
-        api.info("SAN", `  col folder (planned): "${plannedFolder || "(no rootDir)"}"`);
-
-        let itemIDs = [];
-        try {
-            itemIDs = col.getChildItems(true);
-        } catch (e) {
-            try {
-                itemIDs = await col.getChildItemsAsync(true);
-            } catch (e2) {
-                api.error("SAN", `cannot get items for collection: ${String(e2)}`);
-                return;
-            }
+        if (!rootDir) {
+            api.error("SAN", "rootDir not set (scan aborted)");
+            return;
         }
 
-        itemIDs = [...new Set(itemIDs)];
-        api.info("SAN", `  items in scope: ${itemIDs.length}`);
+        // -------------------------
+        // Build recursive collection list
+        // -------------------------
+        const descendants = await this._getDescendantCollections(col.id);
+        const collections = [col, ...descendants];
 
-        let scannedItems = 0;
-        let pdfCount = 0;
+        api.info("SAN", `scan start (recursive) rootCol id=${col.id} key=${col.key} name="${col.name}"`);
+        api.info("SAN", `  collections in scope: ${collections.length}`);
+        api.info("SAN", `  rootDir="${rootDir}"`);
 
-        for (const id of itemIDs) {
-            const item = await Zotero.Items.getAsync(id);
-            if (!item) continue;
+        // -------------------------
+        // PASS 1: collect candidates per attachment
+        // attID -> { attID, attKey, itemID, parentItemID, kind, srcPath, plannedName, candidates:Set(plannedFolder) }
+        // -------------------------
+        const attPlan = new Map();
 
-            if (item.isAttachment() || item.isNote() || item.isAnnotation?.()) continue;
+        for (const curCol of collections) {
+            const chain = await this._collectionChainByID(curCol.id);
+            const plannedFolder = this._collectionDesiredPath(rootDir, chain);
 
-            scannedItems++;
+            let itemIDs = [];
+            try { itemIDs = curCol.getChildItems(true); }
+            catch { itemIDs = await curCol.getChildItemsAsync(true); }
 
-            const title = this._sanitizeName(item.getField("title"));
-            api.info("SAN", `item id=${id} key=${item.key} title="${title}"`);
+            itemIDs = [...new Set(itemIDs)];
 
-            const attIDs = item.getAttachments ? item.getAttachments() : [];
-            if (!attIDs.length) continue;
+            api.info("SAN", `  collect: col="${curCol.name}" key=${curCol.key} items=${itemIDs.length}`);
 
-            for (const attID of attIDs) {
-                const att = await Zotero.Items.getAsync(attID);
-                if (!att || !att.isAttachment()) continue;
+            for (const id of itemIDs) {
+                const item = await Zotero.Items.getAsync(id);
+                if (!item) continue;
+                if (item.isAttachment() || item.isNote() || item.isAnnotation?.()) continue;
 
-                const ct = att.attachmentContentType || att.getField?.("contentType") || "";
-                if (ct !== "application/pdf") continue;
+                const attIDs = item.getAttachments?.() || [];
+                for (const attID of attIDs) {
+                    const att = await Zotero.Items.getAsync(attID);
+                    if (!att || !att.isAttachment()) continue;
 
-                pdfCount++;
+                    const ct = att.attachmentContentType || att.getField?.("contentType") || "";
+                    if (ct !== "application/pdf") continue;
 
-                let path = "";
-                try { path = await att.getFilePathAsync(); } catch { path = ""; }
+                    let path = "";
+                    try { path = await att.getFilePathAsync(); } catch { path = ""; }
 
-                const cls = this._classifyAttachmentPath(path);
+                    const cls = this._classifyAttachmentPath(path);
+                    const plannedName = this._plannedPDFName(item, att);
 
-                const plannedName = this._plannedPDFName(item, att);
-                let plannedPath = null;
-                if (plannedFolder) {
-                    plannedPath = await this._resolveCollision(plannedFolder, plannedName);
-                }
-
-                api.info("SAN", `  pdf att id=${attID} key=${att.key} kind=${cls.kind} (${cls.reason})`);
-                api.info("SAN", `    zoteroPath="${path || "(missing)"}"`);
-                api.info("SAN", `    plannedPath="${plannedPath || "(no planned folder)"}"`);
-
-                if (cls.kind === "STORED") {
-                    api.warn("SAN", `    candidate: STORED -> ACTION copy + add LINKED attachment`);
-
-                    if (!plannedPath) {
-                        api.error("SAN", "    ACTION skipped: plannedPath is null (rootDir not set?)");
-                    } else if (!path) {
-                        api.error("SAN", "    ACTION skipped: stored zoteroPath missing");
-                    } else {
-                        await this._copyAndAddLinkedAttachment({
-                            api,
-                            att,
-                            storedPath: path,
-                            plannedPath
-                        });
-
-                        // >>> Quando você decidir ativar o hard-delete, você chama aqui:
-                        await this._archiveAndDeleteStoredPDF({ api, parentItem: item, storedAtt: att, plannedPath });
+                    let rec = attPlan.get(attID);
+                    if (!rec) {
+                        rec = {
+                            attID,
+                            attKey: att.key,
+                            itemID: item.id,
+                            parentItemID: att.parentItemID,
+                            kind: cls.kind,
+                            srcPath: path,
+                            plannedName,
+                            candidates: new Set(),
+                        };
+                        attPlan.set(attID, rec);
                     }
-                } else if (cls.kind === "LINKED") {
-                    const underRoot = rootDir && path && String(path).startsWith(rootDir);
-                    api.info("SAN", `    check: linkedUnderRoot=${!!underRoot}`);
-                } else if (cls.kind === "MISSING") {
-                    api.warn("SAN", `    candidate: missing file`);
-                } else {
-                    api.warn("SAN", `    candidate: UNKNOWN path format`);
+
+                    rec.candidates.add(_norm(plannedFolder));
                 }
             }
         }
 
-        api.info("SAN", `scan collection done itemsScanned=${scannedItems} pdfAttachments=${pdfCount}`);
+        api.info("SAN", `PASS1 done: pdfAttachmentsFound=${attPlan.size}`);
+
+        // -------------------------
+        // PASS 2: pick a single winner destination per attachment and execute once
+        // Winner policy: lexicographically smallest plannedFolder (stable, deterministic)
+        // -------------------------
+        let moved = 0, copied = 0, skipped = 0;
+
+        for (const rec of attPlan.values()) {
+            const candidates = [...rec.candidates].sort();
+            const plannedFolderWin = candidates[0];
+
+            const plannedPathCanonical = _norm(`${plannedFolderWin}/${rec.plannedName}`);
+
+            const att = await Zotero.Items.getAsync(rec.attID);
+            const item = await Zotero.Items.getAsync(rec.itemID);
+
+            api.info("SAN", `---- attID=${rec.attID} key=${rec.attKey} kind=${rec.kind}`);
+            api.info("SAN", `  winnerFolder="${plannedFolderWin}"`);
+            api.info("SAN", `  plannedPathCanonical="${plannedPathCanonical}"`);
+
+            // Refresh current resolved path (it may have changed since PASS 1)
+            let curPath = "";
+            try { curPath = await att.getFilePathAsync(); } catch { curPath = ""; }
+            curPath = _norm(curPath || "");
+
+            // -------------------------
+            // LINKED
+            // -------------------------
+            if (rec.kind === "LINKED") {
+                if (!curPath) {
+                    api.warn("SAN", `  skip LINKED: missing current path`);
+                    skipped++;
+                    continue;
+                }
+
+                // Idempotent: already at canonical
+                if (_norm(curPath) === plannedPathCanonical) {
+                    api.info("SAN", `  IDEMPOTENT: already at canonical`);
+                    skipped++;
+                    continue;
+                }
+
+                // collision only if canonical is occupied
+                let plannedPath = plannedPathCanonical;
+                if (await _exists(plannedPathCanonical)) {
+                    plannedPath = await this._resolveCollision(plannedFolderWin, rec.plannedName);
+                    api.warn("SAN", `  collision: canonical exists, using "${plannedPath}"`);
+                }
+
+                // if plannedPath ends up equal to src, stop
+                if (_norm(plannedPath) === _norm(curPath)) {
+                    api.info("SAN", `  IDEMPOTENT: src equals chosen dst`);
+                    skipped++;
+                    continue;
+                }
+
+                await this._moveLinkedAttachmentToPlanned({
+                    api,
+                    att,
+                    linkedPath: curPath,
+                    plannedPath
+                });
+
+                moved++;
+                continue;
+            }
+
+            // -------------------------
+            // STORED
+            // -------------------------
+            if (rec.kind === "STORED") {
+                if (!curPath) {
+                    api.warn("SAN", `  skip STORED: missing current path`);
+                    skipped++;
+                    continue;
+                }
+
+                // Strong guardrail: if there's already a LINKED to canonical, do nothing
+                if (rec.parentItemID && await _hasLinkedAttachmentPointingTo({ parentItemID: rec.parentItemID, plannedPath: plannedPathCanonical })) {
+                    api.info("SAN", `  IDEMPOTENT: already linked -> canonical (skip STORED migration)`);
+                    skipped++;
+                    continue;
+                }
+
+                let plannedPath = plannedPathCanonical;
+                if (await _exists(plannedPathCanonical)) {
+                    plannedPath = await this._resolveCollision(plannedFolderWin, rec.plannedName);
+                    api.warn("SAN", `  collision: canonical exists, using "${plannedPath}"`);
+                }
+
+                await this._copyAndAddLinkedAttachment({
+                    api,
+                    att,
+                    storedPath: curPath,
+                    plannedPath,
+                    plannedPathCanonical
+                });
+
+                await this._archiveAndDeleteStoredPDF({ api, parentItem: item, storedAtt: att, plannedPath });
+
+                copied++;
+                continue;
+            }
+
+            // -------------------------
+            // other / missing
+            // -------------------------
+            api.warn("SAN", `  skip: kind=${rec.kind}`);
+            skipped++;
+        }
+
+        api.info("SAN", `scan done (recursive) moved=${moved} copied=${copied} skipped=${skipped} total=${attPlan.size}`);
     }
 };
