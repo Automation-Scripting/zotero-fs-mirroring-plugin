@@ -1,4 +1,10 @@
 // function/collections/update.js
+function _asItemID(x) {
+    if (typeof x === "number" && Number.isFinite(x)) return x;
+    if (typeof x === "string" && x.trim() !== "" && Number.isFinite(Number(x))) return Number(x);
+    if (x && typeof x === "object" && Number.isFinite(x.id)) return x.id;
+    return null;
+}
 
 async function _listCollectionIDsSubtree(rootColID) {
     const out = [];
@@ -38,32 +44,44 @@ async function _rewriteLinkedAttachmentPathsInDir(api, col, prevDir, newDir) {
 
     const prevPrefix = prevDir.endsWith("/") ? prevDir : (prevDir + "/");
 
+    // ---- subtree (coleções) ----
     const colIDs = await _listCollectionIDsSubtree(col.id);
     api.debug("COL", `rewrite: subtree colIDs=${JSON.stringify(colIDs)}`);
 
-    // pega PARENTS nas coleções (não attachments)
+    // ---- parentIDs via Collections API (sem Search) ----
     const parentIDs = new Set();
     for (const cid of colIDs) {
-        const s = new Zotero.Search();
-        s.addCondition("collectionID", "is", cid);
-        const ids = await s.search();
-        for (const id of ids) parentIDs.add(id);
+        const c = await Zotero.Collections.getAsync(cid);
+        if (!c) continue;
+
+        const xs = c.getChildItems?.() || [];
+        for (const x of xs) {
+            const pid = _asItemID(x);
+            if (pid != null) parentIDs.add(pid);
+            else api.debug("COL", `rewrite: skip non-id childItem=${String(x)}`);
+        }
     }
     api.debug("COL", `rewrite: parentIDs=${parentIDs.size}`);
 
-    // agora pega ATTACHMENTS via parents
+    // ---- attachments via parents ----
     const attIDs = new Set();
     for (const pid of parentIDs) {
         const parent = await Zotero.Items.getAsync(pid);
         if (!parent) continue;
-        const a = parent.getAttachments?.() || [];
-        for (const aid of a) attIDs.add(aid);
+
+        const ys = parent.getAttachments?.() || [];
+        for (const y of ys) {
+            const aid = _asItemID(y);
+            if (aid != null) attIDs.add(aid);
+            else api.debug("COL", `rewrite: skip non-id attachment=${String(y)} parent=${pid}`);
+        }
     }
     api.debug("COL", `rewrite: attIDs=${attIDs.size}`);
 
     let changed = 0;
 
     for (const aid of attIDs) {
+        if (!Number.isFinite(aid)) continue; // redundância proposital
         const att = await Zotero.Items.getAsync(aid);
         if (!att || !att.isAttachment?.()) continue;
 
@@ -72,22 +90,13 @@ async function _rewriteLinkedAttachmentPathsInDir(api, col, prevDir, newDir) {
 
         const oldN = _norm(oldPath);
 
-        api.debug(
-            "COL",
-            `rewrite prefix-check: prevPrefix=${JSON.stringify(prevPrefix)} oldN=${JSON.stringify(oldN)} starts=${oldN.startsWith(prevPrefix)}`
-        );
-
-        // não toca storage do Zotero
         if (_isProbablyStored(oldN)) continue;
-
-        // só os que estavam no dir antigo
         if (!oldN.startsWith(prevPrefix)) continue;
 
         const newPath = _norm(newDir + oldN.slice(prevDir.length));
 
         api.info("COL", `rewrite att id=${att.id} "${oldN}" -> "${newPath}"`);
         await _setLinkedAttachmentPath(att, newPath);
-
         changed++;
     }
 
