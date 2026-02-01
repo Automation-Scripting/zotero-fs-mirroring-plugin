@@ -1,3 +1,10 @@
+// function/collections/delete.js
+// depende de: _norm, _exists, _ensureDir, _moveFile, _uniquePath, _parentDir
+// depende de: _isProbablyStored (common/path.js)
+// depende de: PathUtils, IOUtils
+// depende de: _setLinkedAttachmentPath (trash.js)
+// opcional: _isDir (se não tiver, use o fallback try/catch com IOUtils.getChildren)
+
 function _asItemID(x) {
     if (typeof x === "number" && Number.isFinite(x)) return x;
     if (typeof x === "string" && x.trim() !== "" && Number.isFinite(Number(x))) return Number(x);
@@ -31,8 +38,84 @@ async function _collectParentIDsFromCollections(colIDs) {
     return [...parentIDs];
 }
 
-// move attachments que estão em prevDir/* para unfiledBase/<basename(prevDir)>/*
-async function _moveLinkedAttachmentsOutOfCollectionDir(api, parentIDs, prevDir, rootDir, unfiledFolder) {
+// ---- FS walk (para fallback) ----
+async function _walkFiles(dir) {
+    dir = _norm(dir);
+    const out = [];
+
+    if (typeof IOUtils.getChildren !== "function") return out;
+
+    const kids = await IOUtils.getChildren(dir);
+    for (const p of kids) {
+        const pp = _norm(p);
+
+        // ignora DS_Store (flat/fallback)
+        if (PathUtils.filename(pp) === ".DS_Store") continue;
+
+        let isDir = false;
+        try {
+            if (typeof _isDir === "function") {
+                isDir = await _isDir(pp);
+            } else {
+                await IOUtils.getChildren(pp);
+                isDir = true;
+            }
+        } catch {
+            isDir = false;
+        }
+
+        if (isDir) out.push(...await _walkFiles(pp));
+        else out.push(pp);
+    }
+
+    return out;
+}
+
+// ---- relink global (flat) ----
+async function _rewriteAllLinkedAttachmentsWithPrefix_Flat(api, prevDir, newBase) {
+    prevDir = _norm(prevDir);
+    newBase = _norm(newBase);
+    const prevPrefix = prevDir.endsWith("/") ? prevDir : (prevDir + "/");
+
+    let changed = 0;
+
+    // Busca attachments (sem depender de getAll)
+    const s = new Zotero.Search();
+    s.addCondition("itemType", "is", "attachment");
+    const attIDs = await s.search();
+
+    api.info("COL", `delete: relink(flat) candidates=${attIDs.length} prevPrefix=${JSON.stringify(prevPrefix)}`);
+
+    for (const aid of attIDs) {
+        const att = await Zotero.Items.getAsync(aid);
+        if (!att || !att.isAttachment?.()) continue;
+
+        const oldPath = att.getFilePath?.() || att.attachmentPath;
+        if (!oldPath) continue;
+
+        const oldN = _norm(oldPath);
+
+        // só LINKED (não storage)
+        if (_isProbablyStored(oldN)) continue;
+
+        // só os que estavam dentro da pasta deletada
+        if (!oldN.startsWith(prevPrefix)) continue;
+
+        // FLAT: basename
+        const dst0 = _norm(newBase + "/" + PathUtils.filename(oldN));
+        const dst = await _uniquePath(dst0);
+
+        api.info("COL", `delete: relink(flat) att id=${att.id} "${oldN}" -> "${dst}"`);
+        await _setLinkedAttachmentPath(att, dst);
+        changed++;
+    }
+
+    api.info("COL", `delete: relink(flat) changed=${changed}`);
+    return changed;
+}
+
+// ---- move via parents (flat) ----
+async function _moveLinkedAttachmentsOutOfCollectionDir_Flat(api, parentIDs, prevDir, rootDir, unfiledFolder) {
     prevDir = _norm(prevDir);
     const prevPrefix = prevDir.endsWith("/") ? prevDir : (prevDir + "/");
 
@@ -57,16 +140,12 @@ async function _moveLinkedAttachmentsOutOfCollectionDir(api, parentIDs, prevDir,
             if (!oldPath) continue;
 
             const oldN = _norm(oldPath);
-
-            // não toca storage do Zotero
             if (_isProbablyStored(oldN)) continue;
-
-            // só os que estavam dentro da pasta da coleção deletada
             if (!oldN.startsWith(prevPrefix)) continue;
 
-            const rel = oldN.slice(prevPrefix.length);        // relativo dentro da pasta
-            const dst0 = _norm(base + "/" + rel);             // mantém subpastas se existirem
-            await _ensureDir(_parentDir(dst0));
+            // FLAT: só filename
+            const name = PathUtils.filename(oldN);
+            const dst0 = _norm(base + "/" + name);
             const dst = await _uniquePath(dst0);
 
             api.info("COL", `delete: move att "${oldN}" -> "${dst}"`);
@@ -112,9 +191,6 @@ async function _unfileItemsFromCollections(api, colIDs) {
     api.info("COL", `unfile: totalRemoved=${totalRemoved}`);
 }
 
-
-// function/collections/delete.js
-
 var FS_CollectionsDelete = {
     async onDelete(api, id) {
         const prev0 = api.colPathCache.get(id);
@@ -122,32 +198,56 @@ var FS_CollectionsDelete = {
 
         api.info("COL", `delete id=${id} prevPath=${prev ? JSON.stringify(prev) : "null"}`);
 
-        // cleanup cache já
         api.colPathCache.delete(id);
 
         const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true) || "";
         const unfiledFolder = Zotero.Prefs.get("extensions.fs-mirror.unfiledFolder", true) || "_FSMirror_Unfiled";
 
         try {
-            // 1) subtree
             const colIDs = await _listCollectionIDsSubtree(id);
-
-            // 2) coletar parentIDs (antes de mexer nas coleções)
             const parentIDs = await _collectParentIDsFromCollections(colIDs);
             api.debug("COL", `delete: parentIDs=${parentIDs.length}`);
 
-            // 3) mover attachments do dir da coleção -> unfiled (FS) + atualizar linked paths
-            if (prev && rootDir && (await _exists(prev))) {
-                await _ensureDir(_norm(rootDir + "/" + unfiledFolder));
-                await _moveLinkedAttachmentsOutOfCollectionDir(api, parentIDs, prev, rootDir, unfiledFolder);
+            let moved = 0;
 
-                // tenta limpar pasta antiga
-                await _removeDirIfEmpty(prev);
+            if (prev && rootDir && (await _exists(prev))) {
+                const base = _norm(rootDir + "/" + unfiledFolder);
+                await _ensureDir(base);
+
+                // (A) tenta pelo caminho “bonito” via parentIDs
+                moved = await _moveLinkedAttachmentsOutOfCollectionDir_Flat(api, parentIDs, prev, rootDir, unfiledFolder);
+
+                // (B) fallback: parentIDs=0 ou moved=0 => move tudo por FS + relink global
+                if (moved === 0) {
+                    api.warn("COL", `delete: moved=0 via parent-scan; fallback to FS recursive FLAT move + global relink`);
+
+                    const files = await _walkFiles(prev);
+                    for (const src of files) {
+                        const name = PathUtils.filename(src);
+                        if (name === ".DS_Store" || name.startsWith("._")) continue;
+
+                        const dst0 = _norm(base + "/" + name);
+                        const dst = await _uniquePath(dst0);
+                        await _moveFile(src, dst);
+                        moved++;
+                    }
+
+                    api.info("COL", `delete: fallback movedFS=${moved} now relinking...`);
+                    const relinked = await _rewriteAllLinkedAttachmentsWithPrefix_Flat(api, prev, base);
+                    api.info("COL", `delete: fallback relinked=${relinked}`);
+
+                    // remove árvore antiga (recursivo)
+                    try { await IOUtils.remove(_norm(prev), { recursive: true }); } catch { }
+                } else {
+                    // se moveu algo, tenta limpar apenas se estiver vazio
+                    await _removeDirIfEmpty(prev);
+                }
+
             } else {
                 api.warn("COL", `delete: prev missing or rootDir unset -> skip FS move`);
             }
 
-            // 4) Zotero: remover itens das coleções (vira Unfiled)
+            // Zotero: desassocia itens (vira Unfiled)
             await _unfileItemsFromCollections(api, colIDs);
 
         } catch (e) {
