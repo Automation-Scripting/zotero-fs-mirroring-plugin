@@ -36,12 +36,34 @@
               return;
             }
 
-            // 1) classificador (só faz sentido em trash/delete)
+            // --------------------------------------------------
+            // CREATE flow (STORED -> LINKED) — assíncrono / eventual
+            // --------------------------------------------------
+            if (typeof FS_ItemsCreate !== "undefined") {
+              if (event === "add") {
+                for (const id of (ids || [])) {
+                  this.info("ITEM", `enqueue create id=${id} via=add`);
+                  FS_ItemsCreate.queue(this, id, "add");
+                }
+                // não return aqui — deixa continuar caso você queira
+              }
+
+              if (event === "modify" || event === "refresh") {
+                for (const id of (ids || [])) {
+                  this.info("ITEM", `poke create id=${id} via=${event}`);
+                  await FS_ItemsCreate.onModify(this, id, event);
+                }
+                // idem: sem return
+              }
+            }
+
+            // --------------------------------------------------
+            // TRASH / DELETE flow (seu código atual)
+            // --------------------------------------------------
             if (event === "trash" || event === "delete") {
               await FS_ItemsObserver.onTrashOrDelete(this, event, ids);
             }
 
-            // 2) ações específicas
             if (event === "trash") {
               for (const id of (ids || [])) await FS_ItemsObserver.onItemTrash(this, id);
               return;
