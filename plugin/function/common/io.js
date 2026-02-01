@@ -76,3 +76,79 @@ async function _removeDirIfEmpty(dir) {
         }
     } catch { }
 }
+
+async function _listDirNames(dirPath) {
+    const out = [];
+
+    try {
+        const entries = await IOUtils.getChildren(dirPath);
+        for (const entry of entries) {
+            // entry é o path completo
+            const name = PathUtils.filename(entry);
+            out.push(name);
+        }
+    } catch (e) {
+        // diretório não existe ou erro de permissão
+        return [];
+    }
+
+    return out;
+}
+
+async function _isDir(p) {
+    try {
+        // Em builds recentes: IOUtils.stat existe e retorna { type: "directory" | "file" | ... }
+        if (typeof IOUtils.stat === "function") {
+            const st = await IOUtils.stat(_norm(p));
+            return st && st.type === "directory";
+        }
+
+        // Fallback ultra conservador: tenta listar filhos
+        if (typeof IOUtils.getChildren === "function") {
+            await IOUtils.getChildren(_norm(p));
+            return true; // se listou, é diretório
+        }
+
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+// Move/rename de diretório (preferência por move nativo; fallback copy+remove)
+async function _moveDir(src, dst) {
+    src = _norm(src); dst = _norm(dst);
+
+    // Preferir move nativo se existir (atômico no mesmo FS)
+    if (typeof IOUtils.move === "function") {
+        await _ensureDir(_parentDir(dst));
+        await IOUtils.move(src, dst);
+        return;
+    }
+
+    // Fallback: copy recursivo + remove
+    await _copyDir(src, dst);
+    try { await IOUtils.remove(src, { recursive: true }); } catch { }
+}
+
+// Copy recursivo (para fallback do moveDir)
+async function _copyDir(src, dst) {
+    src = _norm(src); dst = _norm(dst);
+    await _ensureDir(dst);
+
+    if (typeof IOUtils.getChildren !== "function") {
+        throw new Error("IOUtils.getChildren not available; cannot copy dir recursively");
+    }
+
+    const children = await IOUtils.getChildren(src);
+    for (const child of children) {
+        const name = PathUtils.filename(child);
+        const dstChild = _norm(dst + "/" + name);
+
+        if (await _isDir(child)) {
+            await _copyDir(child, dstChild);
+        } else {
+            await _copyFile(child, dstChild);
+        }
+    }
+}
