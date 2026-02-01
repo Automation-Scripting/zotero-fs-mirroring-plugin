@@ -12,6 +12,102 @@
 // Top-level "private" helpers (module scope)
 // ------------------------------------------------------------
 
+async function _debugGetAnnotationsRaw({ api, att }) {
+    const res = {
+        attID: att.id,
+        attKey: att.key,
+        via: {},
+    };
+
+    // A) att.getAnnotations()
+    try {
+        if (typeof att.getAnnotations === "function") {
+            const r = att.getAnnotations();
+            res.via.getAnnotations = {
+                ok: true,
+                type: _typeOf(r),
+                isArray: Array.isArray(r),
+                len: Array.isArray(r) ? r.length : null,
+                peek: _peekArray(r),
+                raw: _short(r),
+            };
+        } else {
+            res.via.getAnnotations = { ok: false, reason: "no function" };
+        }
+    } catch (e) {
+        res.via.getAnnotations = { ok: false, error: String(e) };
+    }
+
+    // B) Zotero.Items.getAnnotations(att.id)
+    try {
+        if (typeof Zotero.Items.getAnnotations === "function") {
+            const r = await Zotero.Items.getAnnotations(att.id);
+            res.via.Items_getAnnotations = {
+                ok: true,
+                type: _typeOf(r),
+                isArray: Array.isArray(r),
+                len: Array.isArray(r) ? r.length : null,
+                peek: _peekArray(r),
+                raw: _short(r),
+            };
+        } else {
+            res.via.Items_getAnnotations = { ok: false, reason: "no function" };
+        }
+    } catch (e) {
+        res.via.Items_getAnnotations = { ok: false, error: String(e) };
+    }
+
+    // C) Zotero.Items.getChildren(att.id)
+    try {
+        if (typeof Zotero.Items.getChildren === "function") {
+            const r = await Zotero.Items.getChildren(att.id);
+            res.via.Items_getChildren = {
+                ok: true,
+                type: _typeOf(r),
+                isArray: Array.isArray(r),
+                len: Array.isArray(r) ? r.length : null,
+                peek: _peekArray(r),
+                raw: _short(r),
+            };
+        } else {
+            res.via.Items_getChildren = { ok: false, reason: "no function" };
+        }
+    } catch (e) {
+        res.via.Items_getChildren = { ok: false, error: String(e) };
+    }
+
+    api.info("SAN", `DEBUG annotations raw: ${_short(res, 2000)}`);
+    return res;
+}
+
+function _short(x, n = 220) {
+    try {
+        const s = typeof x === "string" ? x : JSON.stringify(x);
+        if (!s) return String(x);
+        return s.length > n ? s.slice(0, n) + "…(trunc)" : s;
+    } catch {
+        return String(x);
+    }
+}
+
+function _typeOf(x) {
+    if (x === null) return "null";
+    if (Array.isArray(x)) return "array";
+    return typeof x;
+}
+
+function _peekArray(arr, k = 5) {
+    if (!Array.isArray(arr)) return [];
+    return arr.slice(0, k).map(v => {
+        const t = _typeOf(v);
+        if (t === "object") {
+            const keys = Object.keys(v).slice(0, 8);
+            return { t, hasId: "id" in v, id: v.id, keys };
+        }
+        return { t, v };
+    });
+}
+
 function _norm(p) {
     return String(p || "").replace(/\/+/g, "/");
 }
@@ -122,6 +218,119 @@ function _toZoteroLinkedPath(absPath) {
 // ------------------------------------------------------------
 // Public module API
 // ------------------------------------------------------------
+function _getAnnotationItems(att) {
+    try {
+        if (typeof att.getAnnotations === "function") {
+            const arr = att.getAnnotations() || [];
+            // garante que são itens annotation
+            return arr.filter(x => x && (x.isAnnotation?.() || x.itemType === "annotation"));
+        }
+    } catch { }
+    return [];
+}
+
+async function _getChildAnnotationIDs(att) {
+    // tenta APIs mais diretas, dependendo da versão/contexto
+    try {
+        if (typeof att.getAnnotations === "function") {
+            return att.getAnnotations() || [];
+        }
+    } catch { }
+
+    try {
+        if (typeof Zotero.Items.getAnnotations === "function") {
+            return await Zotero.Items.getAnnotations(att.id);
+        }
+    } catch { }
+
+    // fallback: alguns builds expõem children
+    try {
+        if (typeof Zotero.Items.getChildren === "function") {
+            const kids = await Zotero.Items.getChildren(att.id);
+            // pode vir IDs ou itens; normaliza pra IDs
+            return (kids || []).map(k => (typeof k === "number" ? k : k.id)).filter(Boolean);
+        }
+    } catch { }
+
+    return [];
+}
+
+async function _cloneItemToNewParent({ oldItem, newParentID }) {
+    // Estratégia mais resiliente: clona via JSON
+    // (remove campos que não podem repetir e troca o parentItem)
+    const data = oldItem.toJSON ? oldItem.toJSON() : null;
+    if (!data) throw new Error("oldItem.toJSON() unavailable");
+
+    // limpa identidade
+    delete data.key;
+    delete data.version;
+    delete data.dateAdded;
+    delete data.dateModified;
+
+    // garante parent novo
+    data.parentItem = newParentID;
+
+    // cria item novo do mesmo tipo
+    const ni = new Zotero.Item(oldItem.itemType);
+    if (typeof ni.fromJSON === "function") {
+        ni.fromJSON(data);
+    } else {
+        // fallback mínimo: copia campos básicos (bem menos completo)
+        for (const [k, v] of Object.entries(data)) {
+            try { ni.setField(k, v); } catch { }
+        }
+        ni.parentItemID = newParentID;
+    }
+
+    await ni.saveTx();
+    return ni;
+}
+
+async function _transferAnnotations({ api, oldAtt, newAtt }) {
+    const anns = _getAnnotationItems(oldAtt);
+
+    api.info("SAN", `transfer annotations: oldAttKey=${oldAtt.key} -> newAttKey=${newAtt.key} count=${anns.length}`);
+    if (!anns.length) return;
+
+    for (const ann of anns) {
+        try {
+            const data = ann.toJSON ? ann.toJSON() : null;
+            if (!data) throw new Error("annotation.toJSON unavailable");
+
+            // limpa identidade
+            delete data.key;
+            delete data.version;
+            delete data.dateAdded;
+            delete data.dateModified;
+
+            // IMPORTANTÍSSIMO:
+            // no teu JSON, parentItem aparece como KEY do attachment (ex: "8ZARVMR2"),
+            // então vamos manter isso consistente:
+            data.parentItem = newAtt.key;
+
+            const ni = new Zotero.Item("annotation");
+
+            if (typeof ni.fromJSON === "function") {
+                ni.fromJSON(data);
+            } else {
+                // fallback mínimo (raro precisar)
+                ni.parentItemID = newAtt.id;
+            }
+
+            // redundância boa: garante parent por ID também
+            ni.parentItemID = newAtt.id;
+
+            await ni.saveTx();
+        } catch (e) {
+            api.error("SAN", `failed cloning annotation id=${ann.id} key=${ann.key}: ${String(e)}`);
+            // continua; guardrail vai decidir se pode deletar
+        }
+    }
+
+    // guardrail: confirma que o novo attachment "enxerga" annotations
+    const after = _getAnnotationItems(newAtt);
+    api.info("SAN", `transfer annotations done newAttKey=${newAtt.key} nowHas=${after.length}`);
+}
 
 var FS_Sanitize = {
 
@@ -405,6 +614,8 @@ var FS_Sanitize = {
         const parent = await Zotero.Items.getAsync(parentItemID);
         const childIDs = parent?.getAttachments?.() || [];
         api.info("SAN", `PARENT attachments now: [${childIDs.join(", ")}]`);
+
+        return newAtt;
     },
 
     // -------------------------
@@ -659,7 +870,7 @@ var FS_Sanitize = {
                     api.warn("SAN", `  collision: canonical exists, using "${plannedPath}"`);
                 }
 
-                await this._copyAndAddLinkedAttachment({
+                newAtt = await this._copyAndAddLinkedAttachment({
                     api,
                     att,
                     storedPath: curPath,
@@ -667,6 +878,27 @@ var FS_Sanitize = {
                     plannedPathCanonical
                 });
 
+                // DEBUG: inspeciona o que o Zotero retorna como "annotations" do attachment STORED
+                await _debugGetAnnotationsRaw({ api, att });
+
+                // ✅ transfere anotações do STORED(att) para o LINKED(newAtt)
+                if (newAtt) {
+                    await _transferAnnotations({ api, oldAtt: att, newAtt });
+                } else {
+                    api.warn("SAN", "newAtt missing; cannot transfer annotations");
+                }
+
+                api.info("SAN", `AFTER transfer: newAtt annotations=${_getAnnotationItems(newAtt).length}`);
+
+                // verifica se newAtt recebeu as annotations
+                const oldAnn = await _getAnnotationItems(att);
+                const newAnn = newAtt ? await _getAnnotationItems(newAtt) : [];
+                if (oldAnn.length && (!newAnn || newAnn.length < oldAnn.length)) {
+                    api.error("SAN", `guardrail: annotations not fully transferred; ABORT delete storedAttKey=${att.key}`);
+                    continue; // pula deleção
+                }
+
+                // ✅ só agora pode arquivar+apagar
                 await this._archiveAndDeleteStoredPDF({ api, parentItem: item, storedAtt: att, plannedPath });
 
                 copied++;
