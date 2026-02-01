@@ -72,6 +72,52 @@ async function _walkFiles(dir) {
 }
 
 // ---- relink global (flat) ----
+async function _relinkUsingMovedMap(api, prevDir, movedMap) {
+    prevDir = _norm(prevDir);
+    const prevPrefix = prevDir.endsWith("/") ? prevDir : (prevDir + "/");
+
+    let changed = 0;
+
+    const s = new Zotero.Search();
+    s.addCondition("itemType", "is", "attachment");
+    const attIDs = await s.search();
+
+    for (const aid of attIDs) {
+        const att = await Zotero.Items.getAsync(aid);
+        if (!att || !att.isAttachment?.()) continue;
+
+        const oldPath = att.getFilePath?.() || att.attachmentPath;
+        if (!oldPath) continue;
+
+        const oldN = _norm(oldPath);
+        if (_isProbablyStored(oldN)) continue;
+        if (!oldN.startsWith(prevPrefix)) continue;
+
+        // tenta mapear pelo caminho completo
+        let newPath = movedMap.get(oldN);
+
+        // fallback: se não achou (caso raro), tenta por basename dentro do mapa
+        if (!newPath) {
+            const bn = PathUtils.filename(oldN);
+            for (const [k, v] of movedMap.entries()) {
+                if (PathUtils.filename(k) === bn) { newPath = v; break; }
+            }
+        }
+
+        if (!newPath) {
+            api.warn("COL", `delete: relink(map) no dst for att id=${att.id} old=${JSON.stringify(oldN)}`);
+            continue;
+        }
+
+        api.info("COL", `delete: relink(map) att id=${att.id} "${oldN}" -> "${newPath}"`);
+        await _setLinkedAttachmentPath(att, newPath);
+        changed++;
+    }
+
+    api.info("COL", `delete: relink(map) changed=${changed}`);
+    return changed;
+}
+
 async function _rewriteAllLinkedAttachmentsWithPrefix_Flat(api, prevDir, newBase) {
     prevDir = _norm(prevDir);
     newBase = _norm(newBase);
@@ -192,7 +238,10 @@ async function _unfileItemsFromCollections(api, colIDs) {
 }
 
 var FS_CollectionsDelete = {
+
     async onDelete(api, id) {
+
+        const movedMap = new Map(); // oldFullPath -> newFullPath
         const prev0 = api.colPathCache.get(id);
         const prev = prev0 ? _norm(prev0) : null;
 
@@ -228,12 +277,14 @@ var FS_CollectionsDelete = {
 
                         const dst0 = _norm(base + "/" + name);
                         const dst = await _uniquePath(dst0);
+
                         await _moveFile(src, dst);
                         moved++;
+                        movedMap.set(_norm(src), _norm(dst));
                     }
 
                     api.info("COL", `delete: fallback movedFS=${moved} now relinking...`);
-                    const relinked = await _rewriteAllLinkedAttachmentsWithPrefix_Flat(api, prev, base);
+                    const relinked = await _relinkUsingMovedMap(api, prev, movedMap);
                     api.info("COL", `delete: fallback relinked=${relinked}`);
 
                     // remove árvore antiga (recursivo)
