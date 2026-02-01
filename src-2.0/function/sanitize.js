@@ -5,7 +5,6 @@
 // - For each item: PDF attachments
 // - Classifies attachment as LINKED vs STORED
 // - For STORED: COPY to plannedPath + create LINKED attachment (idempotent)
-// - (Next step): archive+delete STORED attachment safely
 //
 
 // ------------------------------------------------------------

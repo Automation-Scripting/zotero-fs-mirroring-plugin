@@ -1,0 +1,6 @@
+Open dev line found: v0.0.x (#16)
+Creating FIX items:
+repo_owner=Automation-Scripting
+repo_name=zotero-fs-mirroring-plugin
+ERROR: option "Fix" not found in field "Status".
+Create it manually in the Project (Status field options) and run again.

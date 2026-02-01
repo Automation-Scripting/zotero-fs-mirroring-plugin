@@ -591,79 +591,53 @@ var FS_ItemsObserver = {
     // EVENT: delete definitivo
     // ------------------------------------------------------------------
     async onItemDelete(api, id) {
-        // ✅ 0) se esse ID foi marcado (ex: note do restore-map), ignora
-        //     (isso cobre o caso em que o Zotero manda delete "missing" também)
+        // ✅ 0) ignore marcado
         if (this._shouldIgnoreDelete(api, id)) {
             api.info("ITEM", `delete id=${id} ignored (marked)`);
             this._clearIgnoreDelete(api, id);
             return;
         }
 
-        let item = await Zotero.Items.getAsync(id);
-
-        // ✅ 1) se existe e é NOTE, ignora sempre (não é attachment)
-        if (item && typeof item.isNote === "function" && item.isNote()) {
-            api.info("ITEM", `delete id=${id} isNote=true (ignored)`);
+        // ✅ 1) SEM DB LOOKUP: delete é pós-commit, item pode não existir
+        const st = this._getCache(api, id);
+        if (!st) {
+            api.debug("ITEM", `delete id=${id} (no cache)`);
             return;
         }
 
-        if (item) {
-            const isAtt = _isAttachmentItem(item);
-            let path = "";
-            try { path = await item.getFilePathAsync(); } catch { }
-            path = _norm(path);
-
-            api.info("ITEM", `delete id=${id} isAttachment=${!!isAtt} path="${path}"`);
-
-            // Só mexe em linked dentro do rootDir
-            if (isAtt && _looksAbsolute(path) && !_isProbablyStored(path)) {
-                const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true) || "";
-                const rootN = _norm(rootDir);
-                if (rootN && path.startsWith(rootN)) {
-                    try {
-                        if (await _exists(path)) {
-                            await IOUtils.remove(path);
-                            api.info("ITEM", `DELETE: removed linked file "${path}"`);
-                        }
-                    } catch (e) {
-                        api.warn("ITEM", `DELETE: could not remove "${path}": ${String(e)}`);
-                    }
-                }
-            }
-        } else {
-            // ✅ 2) caso "missing": antes de cair pro cache, re-checa marked
-            //     (porque o marked pode ter sido setado e o item sumiu rápido)
-            if (this._shouldIgnoreDelete(api, id)) {
-                api.info("ITEM", `delete id=${id} (missing) ignored (marked)`);
-                this._clearIgnoreDelete(api, id);
-                return;
-            }
-
-            api.info("ITEM", `delete id=${id} (missing) -> will use cache if available`);
+        // ✅ 2) Só processa deleção de attachment PDF LINKED
+        // Você precisa ter gravado isso no cache no add/modify:
+        // st.kind: "ATTACHMENT" | "NOTE" | "ANNOTATION" | ...
+        // st.isPDF: boolean
+        // st.linkMode: "LINKED" | "STORED" | ...
+        if (st.kind !== "ATTACHMENT" || !st.isPDF || st.linkMode !== "LINKED") {
+            api.debug("ITEM", `delete id=${id} ignored (cached kind=${st.kind} pdf=${!!st.isPDF} linkMode=${st.linkMode})`);
+            this._ensureCache(api).delete(Number(id));
+            return;
         }
 
-        // fallback via cache (quando chega missing)
-        const st = this._getCache(api, id);
-        if (!st) return;
-
-        const candidate = st.trashedPath || st.lastPath;
-        if (!candidate) return;
+        const candidate = st.lastPath;
+        if (!candidate) {
+            this._ensureCache(api).delete(Number(id));
+            return;
+        }
 
         const rootDir = Zotero.Prefs.get("extensions.fs-mirror.rootDir", true) || "";
         const rootN = _norm(rootDir);
-        if (!rootN) return;
-
-        if (!String(candidate).startsWith(rootN)) return;
+        if (!rootN || !String(candidate).startsWith(rootN)) {
+            this._ensureCache(api).delete(Number(id));
+            return;
+        }
 
         try {
             if (await _exists(candidate)) {
                 await IOUtils.remove(_norm(candidate));
-                api.info("ITEM", `DELETE(cache): removed "${candidate}"`);
+                api.info("ITEM", `DELETE: removed linked file "${candidate}"`);
             } else {
-                api.info("ITEM", `DELETE(cache): file already missing "${candidate}"`);
+                api.info("ITEM", `DELETE: file already missing "${candidate}"`);
             }
         } catch (e) {
-            api.warn("ITEM", `DELETE(cache): failed "${candidate}": ${String(e)}`);
+            api.warn("ITEM", `DELETE: failed "${candidate}": ${String(e)}`);
         } finally {
             this._ensureCache(api).delete(Number(id));
         }
