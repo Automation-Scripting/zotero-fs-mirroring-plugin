@@ -53,8 +53,11 @@ FS_Mirror = {
     // prefs
     this.log?.(`[Preferences] Root dir: ${Zotero.Prefs.get("extensions.fs-mirror.rootDir", true)}`);
     this.log?.(`[Preferences] Logs dir: ${Zotero.Prefs.get("extensions.fs-mirror.logsDir", true)}`);
+    this.log?.(`[Preferences] Unfiled foldeer: ${Zotero.Prefs.get("extensions.fs-mirror.unfiledFolder", true)}`);
     this.log?.(`[Preferences] Trash folder: ${Zotero.Prefs.get("extensions.fs-mirror.safeTrashDirName", true)}`);
+
     this.log?.(`[Preferences] Debug mode: ${Zotero.Prefs.get("extensions.fs-mirror.debug", true)}`);
+    this.log?.(`[Preferences] Internal logs: ${Zotero.Prefs.get("extensions.fs-mirror.echoToZotero", true)}`);
     this.log?.(`[Preferences] Internal logs: ${Zotero.Prefs.get("extensions.fs-mirror.echoToZotero", true)}`);
 
     this.info?.("MAIN", "logger ready (if logfile path exists, it will be written)");

@@ -16,4 +16,8 @@ pref("extensions.fs-mirror.debug", true);
 // também escreve em Zotero.debug
 pref("extensions.fs-mirror.echoToZotero", true);
 
+// Sanitizar recursivamente
 pref("extensions.fs-mirror.sanitizeRecursive", true);
+
+// Diretório para itens sem coleção
+pref("extensions.fs-mirror.unfiledFolder", "_FSMirror_Unfiled");
