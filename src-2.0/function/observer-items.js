@@ -159,6 +159,63 @@ var FS_ItemsObserver = {
         this._ensureIgnore(api).delete(Number(id));
     },
 
+    // ------------------------------------------------------------------
+    // cache (pra lidar com delete "missing")
+    // ------------------------------------------------------------------
+    _ensureCache(api) {
+        if (!api._itemFSState) api._itemFSState = new Map(); // id -> { lastPath, trashedPath, attKey, ts, kind, isPDF, linkMode }
+        return api._itemFSState;
+    },
+
+    _putCache(api, id, data) {
+        const m = this._ensureCache(api);
+        m.set(Number(id), { ...(m.get(Number(id)) || {}), ...data, ts: Date.now() });
+    },
+
+    _getCache(api, id) {
+        const m = this._ensureCache(api);
+        return m.get(Number(id)) || null;
+    },
+
+    // ------------------------------------------------------------------
+    // cache meta (para delete cache-only)
+    // ------------------------------------------------------------------
+    async _cacheMetaFromItem(api, item) {
+        if (!item) return;
+
+        const id = Number(item.id);
+
+        // kind
+        let kind = "OTHER";
+        if (item.isAttachment?.()) kind = "ATTACHMENT";
+        else if (item.isNote?.()) kind = "NOTE";
+        else if (item.isAnnotation?.()) kind = "ANNOTATION";
+
+        // contentType -> isPDF
+        const ct = item.attachmentContentType || item.getField?.("contentType") || "";
+        const isPDF = (ct === "application/pdf");
+
+        // resolved path
+        let p = "";
+        try { p = await item.getFilePathAsync?.(); } catch { }
+        p = _norm(p);
+
+        // linkMode (por heurística de path)
+        const linkMode =
+            _isProbablyStored(p) ? "STORED" :
+                (_looksAbsolute(p) ? "LINKED" : "OTHER");
+
+        const prev = this._getCache(api, id);
+
+        this._putCache(api, id, {
+            kind,
+            isPDF,
+            linkMode,
+            lastPath: p || (prev?.lastPath ?? null),
+            attKey: item.key || (prev?.attKey ?? null),
+        });
+    },
+
     async _restoreAttachmentFromNote(api, attItem) {
         if (!attItem || !_isAttachmentItem(attItem)) return false;
 
@@ -174,7 +231,7 @@ var FS_ItemsObserver = {
         if (!entry || !entry.to || !entry.from) return false;
 
         const from = _norm(entry.to);   // onde está agora (FSMirror trash)
-        const to0 = _norm(entry.from); // destino original
+        const to0 = _norm(entry.from);  // destino original
 
         if (!(await _exists(from))) {
             api.warn("ITEM", `RESTORE(note): missing "${from}" (skip)`);
@@ -193,7 +250,6 @@ var FS_ItemsObserver = {
             return true;
         } catch (e) {
             api.error("ITEM", `RESTORE(note) failed attID=${attItem.id}: ${String(e)}`);
-            // opcional: re-inserir entry no note se quiser (por enquanto não)
             return false;
         }
     },
@@ -232,9 +288,6 @@ var FS_ItemsObserver = {
         const lines = raw.split("\n");
         if (!lines.length) return [];
 
-        // Esperado:
-        // line0: header
-        // rest: JSON (array)
         const json = lines.slice(1).join("\n").trim();
         if (!json) return [];
 
@@ -259,9 +312,7 @@ var FS_ItemsObserver = {
         const arr = await this._readRestoreMapFromNote(note);
         const ts = new Date().toISOString();
 
-        // chave primária: attID (mais robusto); fallback por attKey
         const idx = arr.findIndex(x => Number(x.attID) === Number(attID) || (x.attKey && x.attKey === attKey));
-
         const entry = { attID: Number(attID), attKey: String(attKey || ""), from: _norm(from), to: _norm(to), ts };
 
         if (idx >= 0) arr[idx] = entry;
@@ -295,10 +346,8 @@ var FS_ItemsObserver = {
 
         if (arr.length === 0) {
             try {
-                // ✅ marca pra ignorar o delete event desse noteID
                 this._markIgnoreDelete(api, note.id);
 
-                // ✅ melhor: deferir a deleção pra fora do notifier callstack
                 setTimeout(async () => {
                     try {
                         if (typeof note.eraseTx === "function") await note.eraseTx();
@@ -309,7 +358,6 @@ var FS_ItemsObserver = {
                     } catch (e) {
                         api.warn("NOTE", `restore-map note delete failed: ${String(e)}`);
                     } finally {
-                        // limpa ignore (pra não crescer infinito)
                         this._clearIgnoreDelete(api, note.id);
                     }
                 }, 0);
@@ -331,7 +379,6 @@ var FS_ItemsObserver = {
         const now = Date.now();
         if (!api._pendingCollectionDeletes || api._pendingCollectionDeletes.size === 0) return;
 
-        // expira trackers
         for (const [colID, rec] of api._pendingCollectionDeletes.entries()) {
             if (now - rec.ts <= api._pendingTTLms) continue;
 
@@ -343,7 +390,6 @@ var FS_ItemsObserver = {
             api._pendingCollectionDeletes.delete(colID);
         }
 
-        // marca itens afetados
         for (const [colID, rec] of api._pendingCollectionDeletes.entries()) {
             if (now - rec.ts > api._pendingTTLms) continue;
 
@@ -365,29 +411,12 @@ var FS_ItemsObserver = {
     },
 
     // ------------------------------------------------------------------
-    // cache (pra lidar com delete "missing")
-    // ------------------------------------------------------------------
-    _ensureCache(api) {
-        if (!api._itemFSState) api._itemFSState = new Map(); // id -> { lastPath, trashedPath, attKey, ts }
-        return api._itemFSState;
-    },
-
-    _putCache(api, id, data) {
-        const m = this._ensureCache(api);
-        m.set(Number(id), { ...(m.get(Number(id)) || {}), ...data, ts: Date.now() });
-    },
-
-    _getCache(api, id) {
-        const m = this._ensureCache(api);
-        return m.get(Number(id)) || null;
-    },
-
-    // ------------------------------------------------------------------
     // private: trash de UM attachment (reutilizável)
     // ------------------------------------------------------------------
     async _trashOneAttachment(api, attID) {
         const att = await Zotero.Items.getAsync(attID);
         if (!att || !_isAttachmentItem(att)) return;
+        await this._cacheMetaFromItem(api, att);
 
         let path = "";
         try { path = await att.getFilePathAsync(); } catch { }
@@ -405,7 +434,6 @@ var FS_ItemsObserver = {
         if (!rootDir) return;
 
         const rootN = _norm(rootDir);
-        // if (!originalPath.startsWith(rootN)) return;
 
         const filename = _baseName(originalPath) || `${att.key}.pdf`;
         const dst0 = _trashDestForLinked({ rootDir: rootN, trashName, attKey: att.key, filename });
@@ -414,7 +442,6 @@ var FS_ItemsObserver = {
         // ✅ cache ANTES, com o caminho ORIGINAL
         this._putCache(api, attID, { lastPath: originalPath, trashedPath: dst, attKey: att.key });
 
-        // move + update path (com rollback se update falhar)
         api.info("ITEM", `ACTION: move linked -> trash "${originalPath}" -> "${dst}"`);
         await _moveFile(originalPath, dst);
 
@@ -422,28 +449,25 @@ var FS_ItemsObserver = {
             await _setLinkedAttachmentPath(att, dst);
             api.info("ITEM", `ACTION: updated attachment path -> "${dst}"`);
 
-            // ✅ guarda rota de volta no NOTE do item pai (from = original, to = trash)
             const parentItemID = att.parentItemID;
             if (parentItemID) {
                 await this._upsertRestoreEntry(api, {
                     parentItemID,
                     attID: att.id,
                     attKey: att.key,
-                    from: originalPath, // ✅
-                    to: dst             // ✅
+                    from: originalPath,
+                    to: dst
                 });
             }
         } catch (e) {
             api.error("ITEM", `trash(att) path-update failed, rolling back: ${String(e)}`);
-            // ✅ rollback: volta para o caminho ORIGINAL
             try { await _moveFile(dst, originalPath); } catch { }
             throw e;
         }
     },
+
     // ------------------------------------------------------------------
     // EVENT: trash
-    // - se for attachment: trash do arquivo + update path
-    // - se for item pai: varre attachments e aplica em cada um
     // ------------------------------------------------------------------
     async onItemTrash(api, id) {
         const item = await Zotero.Items.getAsync(id);
@@ -451,6 +475,8 @@ var FS_ItemsObserver = {
             api.info("ITEM", `trash id=${id} (missing)`);
             return;
         }
+
+        await this._cacheMetaFromItem(api, item);
 
         const isAtt = _isAttachmentItem(item);
         const inTrash = _isInTrash(item);
@@ -462,20 +488,23 @@ var FS_ItemsObserver = {
 
         api.info("ITEM", `trash id=${id} key=${key} isAttachment=${!!isAtt} inTrash=${inTrash} path="${path}"`);
 
-        // Caso 1: trash do próprio attachment
         if (isAtt) {
             try { await this._trashOneAttachment(api, id); }
             catch (e) { api.error("ITEM", `trash(att) failed id=${id}: ${String(e)}`); }
             return;
         }
 
-        // Caso 2: trash do metadado (item pai)
         const attIDs = item.getAttachments?.() || [];
         if (!attIDs.length) return;
 
         api.info("ITEM", `trash(parent) id=${id} attachments=[${attIDs.join(",")}]`);
 
+        // ✅ cachear o ATTACHMENT, não o parent
         for (const attID of attIDs) {
+            const att = await Zotero.Items.getAsync(attID);
+            if (!att || !_isAttachmentItem(att)) continue;
+
+            await this._cacheMetaFromItem(api, att);
             try { await this._trashOneAttachment(api, attID); }
             catch (e) { api.error("ITEM", `trash(parent) failed attID=${attID}: ${String(e)}`); }
         }
@@ -497,11 +526,11 @@ var FS_ItemsObserver = {
         if (!entry || !entry.to || !entry.from) return false;
 
         const from = _norm(entry.to);   // trash
-        const to0 = _norm(entry.from); // original
+        const to0 = _norm(entry.from);  // original
 
         if (!(await _exists(from))) {
             api.warn("ITEM", `RESTORE(note): trash file missing "${from}"`);
-            return true; // já não existe; consideramos resolvido pra não travar
+            return true;
         }
 
         const to = await _uniquePath(to0);
@@ -512,9 +541,7 @@ var FS_ItemsObserver = {
             await _setLinkedAttachmentPath(att, to);
             api.info("ITEM", `RESTORE(note): updated attachment path -> "${to}"`);
 
-            // limpa lixo: remove dir do attKey se vazio
-            await _removeDirIfEmpty(_parentDir(from)); // .../LINKED_TRASH/<attKey> (arquivo dentro)
-            // sincroniza cache (opcional)
+            await _removeDirIfEmpty(_parentDir(from));
             this._putCache(api, att.id, { lastPath: to, trashedPath: null, attKey: att.key });
 
             return true;
@@ -526,24 +553,23 @@ var FS_ItemsObserver = {
 
     // ------------------------------------------------------------------
     // EVENT: modify
-    // Detecta restore: attachment saiu da lixeira (inTrash=false)
     // ------------------------------------------------------------------
     async onItemModify(api, id) {
         const item = await Zotero.Items.getAsync(id);
         if (!item) return;
 
-        // Se ainda está no trash, não é restore
+        await this._cacheMetaFromItem(api, item);
+
         if (_isInTrash(item)) return;
 
-        // -----------------------------
         // Caso A) modify do ATTACHMENT
-        // -----------------------------
         if (_isAttachmentItem(item)) {
-            // 1) restore via NOTE (preferencial)
+            // ✅ cache do próprio item (att), não "att" inexistente
+            await this._cacheMetaFromItem(api, item);
+
             const ok = await this._restoreOneFromNote(api, item);
             if (ok) return;
 
-            // 2) fallback cache
             const st = this._getCache(api, id);
             if (!st || !st.trashedPath || !st.lastPath) return;
 
@@ -571,9 +597,7 @@ var FS_ItemsObserver = {
             return;
         }
 
-        // -----------------------------
-        // Caso B) modify do PARENT (seu caso real do restore pela UI)
-        // -----------------------------
+        // Caso B) modify do PARENT (restore pela UI)
         const attIDs = item.getAttachments?.() || [];
         if (!attIDs.length) return;
 
@@ -582,7 +606,8 @@ var FS_ItemsObserver = {
         for (const attID of attIDs) {
             const att = await Zotero.Items.getAsync(attID);
             if (!att || !_isAttachmentItem(att)) continue;
-            // tenta restaurar cada um pelo note
+
+            await this._cacheMetaFromItem(api, att);
             await this._restoreOneFromNote(api, att);
         }
     },
@@ -591,25 +616,18 @@ var FS_ItemsObserver = {
     // EVENT: delete definitivo
     // ------------------------------------------------------------------
     async onItemDelete(api, id) {
-        // ✅ 0) ignore marcado
         if (this._shouldIgnoreDelete(api, id)) {
             api.info("ITEM", `delete id=${id} ignored (marked)`);
             this._clearIgnoreDelete(api, id);
             return;
         }
 
-        // ✅ 1) SEM DB LOOKUP: delete é pós-commit, item pode não existir
         const st = this._getCache(api, id);
         if (!st) {
             api.debug("ITEM", `delete id=${id} (no cache)`);
             return;
         }
 
-        // ✅ 2) Só processa deleção de attachment PDF LINKED
-        // Você precisa ter gravado isso no cache no add/modify:
-        // st.kind: "ATTACHMENT" | "NOTE" | "ANNOTATION" | ...
-        // st.isPDF: boolean
-        // st.linkMode: "LINKED" | "STORED" | ...
         if (st.kind !== "ATTACHMENT" || !st.isPDF || st.linkMode !== "LINKED") {
             api.debug("ITEM", `delete id=${id} ignored (cached kind=${st.kind} pdf=${!!st.isPDF} linkMode=${st.linkMode})`);
             this._ensureCache(api).delete(Number(id));
