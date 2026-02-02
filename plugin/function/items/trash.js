@@ -4,6 +4,18 @@
 // depende de: _isAttachmentItem, _isInTrash
 // depende de: FS_ItemsCache (cache.js)
 
+
+function _trashDestForLinked({ rootDir, trashName, attKey, filename }) {
+    const base = _norm(rootDir);
+    const tname = trashName || "_FSMirror_Trash";
+    const safeKey = String(attKey || "NO_KEY");
+    const safeName = String(filename || "Untitled.pdf");
+
+    // espelha teu layout atual: <root>/<trash>/LINKED_TRASH/<attKey>/<filename>
+    return _norm(`${base}/${tname}/LINKED_TRASH/${safeKey}/${safeName}`);
+}
+
+
 async function _setLinkedAttachmentPath(att, newPath) {
     const p = _norm(newPath);
 
@@ -237,6 +249,7 @@ async function _trashOneAttachment(api, attID) {
     FS_ItemsCache._putCache(api, attID, { lastPath: originalPath, trashedPath: dst, attKey: att.key });
 
     api.info("ITEM", `ACTION: move linked -> trash "${originalPath}" -> "${dst}"`);
+    await _ensureDir(_parentDir(dst));
     await _moveFile(originalPath, dst);
 
     try {
