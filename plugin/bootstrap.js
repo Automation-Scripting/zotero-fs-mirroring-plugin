@@ -53,6 +53,7 @@ async function startup({ id, version, rootURI }) {
 	Services.scriptloader.loadSubScript(rootURI + "function/items/update.js");
 	Services.scriptloader.loadSubScript(rootURI + "function/items/delete.js");
 	Services.scriptloader.loadSubScript(rootURI + "function/items/index.js");
+	Services.scriptloader.loadSubScript(rootURI + "function/items/create.js");
 	Services.scriptloader.loadSubScript(rootURI + "function/items/observer-items.js");
 
 	// ----------------------------

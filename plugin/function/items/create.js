@@ -300,6 +300,8 @@ function _schedule(api, attID, reason, delayMs = 350) {
             api.error("ITEM", `create: tryFinalize attID=${attID} failed: ${String(e)}`);
         });
     }, delayMs);
+
+
 }
 
 // ============================================================
@@ -321,12 +323,14 @@ var FS_ItemsCreate = {
     },
 
     async tryFinalize(api, attID) {
+        api.info("ITEM", `tryFinalize ENTER api=${!!api} attID=${attID}`);
         const st = _pending.get(attID);
         if (!st) return;
 
         st.tries++;
 
         const att = await Zotero.Items.getAsync(attID);
+
         if (!att) {
             api.warn("ITEM", `create: pending attID=${attID} disappeared; drop`);
             _pending.delete(attID);
@@ -348,8 +352,15 @@ var FS_ItemsCreate = {
         api.info("ITEM", `create: READY attID=${attID} tries=${st.tries} -> finalizing`);
         _pending.delete(attID);
 
-        // chama o worker de migração
-        await this.onAdd(api, attID);
+        try {
+            // 1) log antes
+            api.info("ITEM", `create: calling onAdd(api, ${attID})`);
+            await this.onAdd(api, attID);
+            api.info("ITEM", `create: onAdd done attID=${attID}`);
+        } catch (e) {
+            api.error("ITEM", `create: onAdd failed attID=${attID}: ${String(e)}\n${e?.stack || ""}`);
+            throw e; // mantém o erro subindo (pra você ver no log externo também)
+        }
     },
 
     // ---- o seu worker: migra STORED -> LINKED ----
@@ -386,8 +397,10 @@ var FS_ItemsCreate = {
         const filename = _plannedPDFName(parentItem);
         const canonical = _norm(`${plannedFolder}/${filename}`);
 
-        // guardrail forte: se já existe LINKED apontando pro canônico, não faz nada
-        if (await _hasLinkedAttachmentPointingTo({ parentItem, plannedPath: canonical })) {
+        if (await _hasLinkedAttachmentPointingTo({
+            parentItemID: parentItem.id,
+            plannedPath: canonical
+        })) {
             api.info("ITEM", `create: already linked -> canonical, skip STORED migrate attKey=${item.key}`);
             return;
         }
