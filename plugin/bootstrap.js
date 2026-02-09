@@ -57,6 +57,11 @@ async function startup({ id, version, rootURI }) {
 	Services.scriptloader.loadSubScript(rootURI + "function/items/observer-items.js");
 
 	// ----------------------------
+	// COLLECTION-ITEMS
+	// ----------------------------
+	Services.scriptloader.loadSubScript(rootURI + "function/collection-items/observer-collection-items.js");
+
+	// ----------------------------
 	// COLLECTIONS
 	// ----------------------------
 	Services.scriptloader.loadSubScript(rootURI + "function/collections/read.js");

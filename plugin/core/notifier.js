@@ -86,6 +86,31 @@
             return;
           }
 
+          // -------------------------
+          // COLLECTION-ITEM events (drag/copy between collections)
+          // -------------------------
+          if (type === "collection-item") {
+            this.info("NOTIFY", `event=${event} type=${type} ids=[${(ids || []).join(",")}] extra=${JSON.stringify(extraData || {})}`);
+
+            if (typeof FS_CollectionItemsObserver === "undefined") {
+              this.warn("NOTIFY", "FS_CollectionItemsObserver is undefined (did you load function/collection-items/observer-collection-items.js?)");
+              return;
+            }
+
+            if (event === "add") {
+              for (const x of (ids || [])) await FS_CollectionItemsObserver.onAdd(this, x);
+              return;
+            }
+
+            if (event === "remove") {
+              for (const x of (ids || [])) await FS_CollectionItemsObserver.onRemove(this, x);
+              return;
+            }
+
+            this.debug("NOTIFY", `ignored collection-item event=${event}`);
+            return;
+          }
+
           // outros tipos (search, tag, etc.)
           this.debug("NOTIFY", `ignored type=${type} event=${event}`);
         } catch (e) {
@@ -96,7 +121,7 @@
 
     this._notifierID = Zotero.Notifier.registerObserver(
       observer,
-      ["collection", "item"],
+      ["collection", "item", "collection-item"],
       "fs-mirror"
     );
 

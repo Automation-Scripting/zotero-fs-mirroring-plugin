@@ -1,5 +1,5 @@
 .row {
-	color: red;
+	color: gray;
 }
 
 window[data-green-instead] .row {

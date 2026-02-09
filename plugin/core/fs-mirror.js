@@ -60,6 +60,8 @@ FS_Mirror = {
     this.log?.(`[Preferences] Internal logs: ${Zotero.Prefs.get("extensions.fs-mirror.echoToZotero", true)}`);
     this.log?.(`[Preferences] Internal logs: ${Zotero.Prefs.get("extensions.fs-mirror.echoToZotero", true)}`);
 
+    this.log?.(`[Preferences] Internal logs: ${Zotero.Prefs.get("extensions.fs-mirror.dragMoveSingleCollection", true)}`);
+
     this.info?.("MAIN", "logger ready (if logfile path exists, it will be written)");
   },
 

@@ -1,6 +1,5 @@
 pref("extensions.make-it-red.intensity", 100);
 
-
 // Diretório raiz no filesystem onde o espelhamento acontece
 pref("extensions.fs-mirror.rootDir", "");
 
@@ -21,3 +20,6 @@ pref("extensions.fs-mirror.sanitizeRecursive", true);
 
 // Diretório para itens sem coleção
 pref("extensions.fs-mirror.unfiledFolder", "_FSMirror_Unfiled");
+
+// Mover Item ao Arrastar entre Collections
+pref("extensions.fs-mirror.dragMoveSingleCollection", true);
